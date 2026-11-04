@@ -85,6 +85,32 @@ button.icon:hover { color: var(--fg); }
 body.term-mode #input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px; }
 .send { width: 36px; height: 36px; border-radius: 50%; padding: 0; background: var(--acc); border: 0; color: #fff; font-size: 18px; font-weight: 700; flex: none; }
 .send:disabled { background: #4a4945; color: #8a8984; }
+.mic { width: 36px; height: 36px; border-radius: 50%; padding: 0; background: none; border: 0; color: var(--mute); flex: none; display: grid; place-items: center; position: relative; }
+.mic[hidden] { display: none; }
+.mic svg { width: 20px; height: 20px; }
+.mic.on { background: var(--err); color: #fff; }
+.mic.on svg { display: none; }
+.mic.on::after { content: ""; width: 12px; height: 12px; border-radius: 3px; background: #fff; }
+.mic.on::before { content: ""; position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--err); animation: mic-ring 1.4s ease-out infinite; }
+@keyframes mic-ring { from { transform: scale(1); opacity: .8; } to { transform: scale(1.6); opacity: 0; } }
+#composer.dictating .box { border-color: rgba(239, 106, 95, .6); box-shadow: 0 0 0 3px rgba(239, 106, 95, .12); }
+#dictation { display: flex; align-items: center; gap: 10px; max-width: 800px; margin: 0 auto 6px; padding: 4px 6px 4px 14px; background: var(--panel); border-radius: 18px; font-size: 13px; color: var(--mute); }
+#dictation[hidden] { display: none; }
+#dictation .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--err); flex: none; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: .25; } }
+#dictation .wave { display: flex; align-items: center; gap: 3px; height: 20px; flex: none; }
+#dictation .wave i { width: 3px; height: 4px; border-radius: 2px; background: var(--err); transition: height .2s; }
+#dictation.hearing .wave i { animation: wave .9s ease-in-out infinite; }
+#dictation.hearing .wave i:nth-child(2) { animation-delay: -.7s; }
+#dictation.hearing .wave i:nth-child(3) { animation-delay: -.2s; }
+#dictation.hearing .wave i:nth-child(4) { animation-delay: -.5s; }
+#dictation.hearing .wave i:nth-child(5) { animation-delay: -.35s; }
+@keyframes wave { 0%, 100% { height: 4px; } 50% { height: 18px; } }
+#dictation .status { flex: 1; min-width: 0; }
+#dictation .time { font-variant-numeric: tabular-nums; }
+#dictation button { flex: none; min-height: 30px; padding: 0 .8em; border-radius: 15px; background: var(--raised); border: 0; color: var(--fg); font-size: 13px; }
+#dictation .cancel { width: 30px; padding: 0; color: var(--mute); }
+@media (prefers-reduced-motion: reduce) { #dictation .dot, #dictation.hearing .wave i, .mic.on::before { animation: none; } #dictation.hearing .wave i { height: 12px; } }
 .send.stop { background: var(--fg); color: var(--bg); font-size: 13px; }
 #keys { display: flex; gap: 6px; overflow-x: auto; max-width: 800px; margin: 0 auto 6px; scrollbar-width: none; }
 #keys::-webkit-scrollbar { display: none; }

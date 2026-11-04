@@ -24,6 +24,13 @@ swarm of remote funnels: here, one phone steering many coding agents.
 - **Markdown and file previews** rendered, following the file as it changes.
 - **New session**: pick a folder, optionally describe a task; a new workspace
   starts `claude` there and opens its chat.
+- **Dictation**: the composer's mic button types what you say at the caret,
+  using the browser's speech recognition (Chrome sends the audio to Google,
+  Safari to Apple). It starts in Chinese when Chinese is among the system
+  languages; a button on the recording bar switches language, and ✕ restores
+  the text from before. Review the text, then send. The button is hidden where
+  the browser has no speech recognition; the keyboard's own dictation key
+  works there too.
 - **Notifications** in a list laid out like cmux's, with browser
   notifications; opening an item marks its notifications read.
 

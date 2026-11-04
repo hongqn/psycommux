@@ -476,6 +476,149 @@ async function startSession(prompt) {
 }
 $("newChat").onclick = () => select(state.sel && state.sel.wsId, null, "new");
 
+// ---- dictation ----------------------------------------------------------------------------------
+// The browser's speech recognition (Chrome sends audio to Google, Safari to Apple) types into the
+// composer at the caret; the user reviews the text before sending. While it listens, a bar above the
+// box shows a level animation, the elapsed time, the language (tap to switch) and a cancel button.
+const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+// navigator.language is only the first system language, so a phone set to English with Chinese as a
+// second language would get English recognition: offer Chinese and English, plus any other system language.
+const DICTATION_LANGS = (() => {
+  const langs = [["zh-CN", "中文"], ["en-US", "EN"]];
+  for (const l of navigator.languages || [navigator.language]) {
+    if (l && !/^(zh|en)\b/i.test(l) && !langs.some(([code]) => code === l)) langs.push([l, l.split("-")[0].toUpperCase()]);
+  }
+  return langs;
+})();
+function defaultDictationLang() {
+  const pick = saved("cmuxDictationLang", "");
+  if (DICTATION_LANGS.some(([code]) => code === pick)) return pick;
+  const sys = navigator.languages || [navigator.language || "en-US"];
+  if (sys.some((l) => /^zh\b/i.test(l))) return "zh-CN";
+  const first = DICTATION_LANGS.find(([code]) => code.split("-")[0] === String(sys[0]).split("-")[0].toLowerCase());
+  return first ? first[0] : "en-US";
+}
+// rec: the running recognizer; before/after: the text around the dictated part; original: the text
+// before dictation began, for cancel; started: Date.now() at start, for the timer.
+const dictation = { rec: null, lang: "", before: "", after: "", original: "", started: 0, timer: 0 };
+
+function dictationBar() {
+  let bar = $("dictation");
+  if (bar) return bar;
+  const lang = el("button", { className: "lang", title: "Recognition language" });
+  lang.onclick = () => {
+    const i = DICTATION_LANGS.findIndex(([code]) => code === dictation.lang);
+    dictation.lang = DICTATION_LANGS[(i + 1) % DICTATION_LANGS.length][0];
+    save("cmuxDictationLang", dictation.lang);
+    listen();  // restart in the new language, keeping what was recognized so far
+  };
+  const cancel = el("button", { className: "cancel", title: "Cancel dictation", textContent: "✕" });
+  cancel.onclick = () => {
+    const original = dictation.original;
+    stopDictation(true);
+    $("input").value = original;
+    growInput();
+  };
+  for (const b of [lang, cancel]) b.addEventListener("pointerdown", (e) => { if (document.activeElement === $("input")) e.preventDefault(); });
+  const wave = el("span", { className: "wave" });
+  for (let i = 0; i < 5; i++) wave.append(el("i"));
+  bar = el("div", { id: "dictation", hidden: true },
+    el("span", { className: "dot" }), wave,
+    el("span", { className: "status", textContent: "Listening…" }),
+    el("span", { className: "time", textContent: "0:00" }),
+    lang, cancel);
+  $("composer").insertBefore(bar, $("composer").querySelector(".box"));
+  return bar;
+}
+
+function renderDictation() {
+  const bar = dictationBar();
+  const on = !!dictation.rec;
+  bar.hidden = !on;
+  $("composer").classList.toggle("dictating", on);
+  $("micBtn").classList.toggle("on", on);
+  $("micBtn").title = on ? "Stop dictation" : "Dictate";
+  clearInterval(dictation.timer);
+  if (!on) { bar.classList.remove("hearing"); return; }
+  const label = DICTATION_LANGS.find(([code]) => code === dictation.lang);
+  bar.querySelector(".lang").textContent = label ? label[1] : dictation.lang;
+  const tick = () => {
+    const sec = Math.floor((Date.now() - dictation.started) / 1000);
+    bar.querySelector(".time").textContent = Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0");
+  };
+  tick();
+  dictation.timer = setInterval(tick, 500);
+}
+
+function setHearing(on) {
+  const bar = dictationBar();
+  bar.classList.toggle("hearing", on);
+  bar.querySelector(".status").textContent = on ? "" : "Listening…";
+}
+
+// Stopping lets the last words arrive; cancelling (on send, cancel or leaving the view) drops them.
+function stopDictation(cancel) {
+  const rec = dictation.rec;
+  if (!rec) return;
+  if (cancel) { dictation.rec = null; rec.abort(); renderDictation(); } else rec.stop();
+}
+
+// Start (or restart) a recognizer in dictation.lang that types at the caret.
+function listen() {
+  const input = $("input");
+  const old = dictation.rec;
+  dictation.rec = null;
+  if (old) old.abort();
+  const rec = new Speech();
+  rec.lang = dictation.lang;
+  rec.continuous = true;
+  rec.interimResults = true;
+  dictation.before = input.value.slice(0, input.selectionStart);
+  dictation.after = input.value.slice(input.selectionEnd);
+  rec.onresult = (e) => {
+    if (dictation.rec !== rec) return;
+    let text = "";
+    for (const r of e.results) text += r[0].transcript;
+    // Words in languages written with spaces need one between them and the text before.
+    const gap = text && dictation.before && !/\s$/.test(dictation.before) && !/^\s/.test(text) && !/^(zh|ja|ko)\b/i.test(rec.lang) ? " " : "";
+    input.value = dictation.before + gap + text + dictation.after;
+    const caret = (dictation.before + gap + text).length;
+    input.setSelectionRange(caret, caret);
+    growInput();
+    setHearing(true);
+  };
+  rec.onspeechstart = () => { if (dictation.rec === rec) setHearing(true); };
+  rec.onspeechend = () => { if (dictation.rec === rec) setHearing(false); };
+  rec.onerror = (e) => {
+    if (dictation.rec !== rec || e.error === "no-speech" || e.error === "aborted") return;
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      alert("Speech recognition is not allowed here. Allow the microphone for this site, or use the keyboard's dictation key.");
+    } else if (e.error === "language-not-supported") {
+      alert("This browser cannot recognize " + rec.lang + ". Tap the language button to pick another.");
+    } else alert("Dictation failed: " + e.error);
+  };
+  rec.onend = () => {
+    if (dictation.rec !== rec) return;
+    dictation.rec = null;
+    renderDictation();
+  };
+  dictation.rec = rec;
+  try { rec.start(); } catch (e) { dictation.rec = null; }
+  setHearing(false);
+  renderDictation();
+}
+
+function startDictation() {
+  dictation.lang = defaultDictationLang();
+  dictation.original = $("input").value;
+  dictation.started = Date.now();
+  listen();
+}
+
+$("micBtn").hidden = !Speech;
+$("micBtn").addEventListener("pointerdown", (e) => { if (document.activeElement === $("input")) e.preventDefault(); });
+$("micBtn").onclick = () => (dictation.rec ? stopDictation(false) : startDictation());
+
 // ---- composer -------------------------------------------------------------------------------
 const TERMINAL_KEYS = [["Enter", "enter"], ["Esc", "escape"], ["Ctrl-C", "ctrl+c"], ["Tab", "tab"], ["⇧Tab", "shift+tab"], ["↑", "up"], ["↓", "down"], ["←", "left"], ["→", "right"], ["Ctrl-D", "ctrl+d"], ["PgUp", "pageup"], ["PgDn", "pagedown"]];
 const BROWSER_KEYS = [["Enter", "Enter"], ["Tab", "Tab"], ["⌫", "Backspace"], ["Esc", "Escape"], ["↑", "ArrowUp"], ["↓", "ArrowDown"]];
@@ -494,6 +637,7 @@ function updateComposer(view, surface) {
   send.textContent = stop ? "■" : "↑";
   send.title = stop ? "Stop Claude" : "Send";
   if (mode === composerMode) return;
+  stopDictation(true);
   composerMode = mode;
   $("input").placeholder = { chat: "Reply to Claude", terminal: "Type a command", browser: "Type into the page", new: "Describe a task (optional)" }[mode] || "";
   $("input").enterKeyHint = mode === "chat" && PHONE.matches ? "enter" : mode === "new" ? "go" : "send";
@@ -515,6 +659,7 @@ function updateComposer(view, surface) {
 }
 
 async function submit() {
+  stopDictation(true);
   const input = $("input");
   const text = input.value;
   const { surface } = selected();
