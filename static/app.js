@@ -500,7 +500,12 @@ function defaultDictationLang() {
 }
 // rec: the running recognizer; before/after: the text around the dictated part; original: the text
 // before dictation began, for cancel; started: Date.now() at start, for the timer.
-const dictation = { rec: null, lang: "", before: "", after: "", original: "", started: 0, timer: 0 };
+// more: keep listening after the recognizer ends (single-utterance mode, see ONE_UTTERANCE).
+const dictation = { rec: null, lang: "", before: "", after: "", original: "", started: 0, timer: 0, more: false };
+// Android Chrome's continuous mode repeats earlier words in later results, reworded or repunctuated so
+// that no text comparison can drop them. There a recognizer hears one utterance, and the next starts
+// after the caret when it ends, until the user stops or falls silent.
+const ONE_UTTERANCE = /Android/i.test(navigator.userAgent);
 
 function dictationBar() {
   let bar = $("dictation");
@@ -556,10 +561,27 @@ function setHearing(on) {
   bar.querySelector(".status").textContent = on ? "" : "Listening…";
 }
 
+// The results of one recognition session, as one text. Each result should be the next stretch of
+// speech, but in continuous mode iOS Safari and Android Chrome may repeat earlier words: a result can
+// hold everything said so far, or repeat the previous result. So a result that starts with the text so
+// far replaces it, one the text already ends with is dropped, and others are appended. Spacing is
+// ignored when comparing, as the engines change it between results.
+function mergeTranscripts(parts) {
+  const bare = (t) => t.replace(/\s+/g, "");
+  let text = "";
+  for (const part of parts) {
+    if (!bare(part)) continue;
+    if (bare(part).startsWith(bare(text))) text = part;
+    else if (!bare(text).endsWith(bare(part))) text += part;
+  }
+  return text.replace(/^\s+/, "");
+}
+
 // Stopping lets the last words arrive; cancelling (on send, cancel or leaving the view) drops them.
 function stopDictation(cancel) {
   const rec = dictation.rec;
   if (!rec) return;
+  dictation.more = false;
   if (cancel) { dictation.rec = null; rec.abort(); renderDictation(); } else rec.stop();
 }
 
@@ -571,14 +593,13 @@ function listen() {
   if (old) old.abort();
   const rec = new Speech();
   rec.lang = dictation.lang;
-  rec.continuous = true;
+  rec.continuous = !ONE_UTTERANCE;
   rec.interimResults = true;
   dictation.before = input.value.slice(0, input.selectionStart);
   dictation.after = input.value.slice(input.selectionEnd);
   rec.onresult = (e) => {
     if (dictation.rec !== rec) return;
-    let text = "";
-    for (const r of e.results) text += r[0].transcript;
+    const text = mergeTranscripts(Array.from(e.results, (r) => r[0].transcript));
     // Words in languages written with spaces need one between them and the text before.
     const gap = text && dictation.before && !/\s$/.test(dictation.before) && !/^\s/.test(text) && !/^(zh|ja|ko)\b/i.test(rec.lang) ? " " : "";
     input.value = dictation.before + gap + text + dictation.after;
@@ -590,7 +611,9 @@ function listen() {
   rec.onspeechstart = () => { if (dictation.rec === rec) setHearing(true); };
   rec.onspeechend = () => { if (dictation.rec === rec) setHearing(false); };
   rec.onerror = (e) => {
-    if (dictation.rec !== rec || e.error === "no-speech" || e.error === "aborted") return;
+    if (dictation.rec !== rec) return;
+    dictation.more = false;  // silence ("no-speech") also ends dictation
+    if (e.error === "no-speech" || e.error === "aborted") return;
     if (e.error === "not-allowed" || e.error === "service-not-allowed") {
       alert("Speech recognition is not allowed here. Allow the microphone for this site, or use the keyboard's dictation key.");
     } else if (e.error === "language-not-supported") {
@@ -599,6 +622,7 @@ function listen() {
   };
   rec.onend = () => {
     if (dictation.rec !== rec) return;
+    if (ONE_UTTERANCE && dictation.more) { listen(); return; }  // the caret is after the last utterance
     dictation.rec = null;
     renderDictation();
   };
@@ -612,6 +636,7 @@ function startDictation() {
   dictation.lang = defaultDictationLang();
   dictation.original = $("input").value;
   dictation.started = Date.now();
+  dictation.more = true;
   listen();
 }
 
