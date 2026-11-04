@@ -216,33 +216,108 @@ pub fn qr_render(text: &str) -> Result<String, String> {
     Ok(rows.join("\n"))
 }
 
-/// A ">_" prompt on a dark square, drawn here so the project ships no binary files.
+/// The psycommu: a glowing core (the phone) inside its thought waves, with a
+/// ring of funnels (the agents) flying around it. Drawn here so the project
+/// ships no binary files; every pixel averages a 4x4 grid of samples.
 pub fn icon_png(size: u32) -> Vec<u8> {
+    const ACCENT: [f64; 3] = [217.0, 119.0, 87.0];
+    const FUNNELS: usize = 6;
+    const ORBIT: f64 = 0.33;
+    const TRAIL: f64 = 0.75; // radians of orbit behind each funnel
     let s = size as f64;
-    let (bg, fg) = ([0x1E, 0x1E, 0x1E], [0xD9, 0x77, 0x57]);
-    let half = 0.045 * s;
-    let segments = [((0.27, 0.32), (0.47, 0.50)), ((0.47, 0.50), (0.27, 0.68))]
-        .map(|((ax, ay), (bx, by))| ((ax * s, ay * s), (bx * s, by * s)));
-    let bar = (0.53 * s, 0.62 * s, 0.75 * s, 0.62 * s + 2.0 * half);
-    let on = |x: f64, y: f64| {
-        if bar.0 <= x && x <= bar.2 && bar.1 <= y && y <= bar.3 {
-            return true;
-        }
-        segments.iter().any(|&((ax, ay), (bx, by))| {
-            let (dx, dy) = (bx - ax, by - ay);
-            let t = (((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
-            (x - ax - t * dx).powi(2) + (y - ay - t * dy).powi(2) <= half * half
+    let start = -std::f64::consts::FRAC_PI_2;
+    let step = std::f64::consts::TAU / FUNNELS as f64;
+    // Shapes in unit coordinates, centered on (0, 0), y down.
+    let funnels: Vec<[(f64, f64); 3]> = (0..FUNNELS)
+        .map(|i| {
+            let angle = start + i as f64 * step;
+            let (cx, cy) = (ORBIT * angle.cos(), ORBIT * angle.sin());
+            // Flying clockwise along the orbit, nose turned a little outward.
+            let heading = angle + std::f64::consts::FRAC_PI_2 - 0.35;
+            let (hx, hy) = (heading.cos(), heading.sin());
+            let (len, base) = (0.068, 0.034);
+            [
+                (cx + hx * len, cy + hy * len),
+                (
+                    cx - hx * len * 0.8 - hy * base,
+                    cy - hy * len * 0.8 + hx * base,
+                ),
+                (
+                    cx - hx * len * 0.8 + hy * base,
+                    cy - hy * len * 0.8 - hx * base,
+                ),
+            ]
         })
+        .collect();
+    let in_triangle = |x: f64, y: f64, t: &[(f64, f64); 3]| {
+        let side = |(ax, ay): (f64, f64), (bx, by): (f64, f64)| {
+            (bx - ax) * (y - ay) - (by - ay) * (x - ax)
+        };
+        let (a, b, c) = (side(t[0], t[1]), side(t[1], t[2]), side(t[2], t[0]));
+        (a >= 0.0 && b >= 0.0 && c >= 0.0) || (a <= 0.0 && b <= 0.0 && c <= 0.0)
     };
+    // Color of one sample point.
+    let sample = |x: f64, y: f64| -> [f64; 3] {
+        let r = (x * x + y * y).sqrt();
+        // Background: warm dark, a little lighter toward the middle, plus the core's glow.
+        let shade = 30.0 + 14.0 * (1.0 - (r / 0.7).min(1.0));
+        let glow = (-(r / 0.16).powi(2)).exp() * 0.55;
+        let mut c = [
+            shade + (ACCENT[0] - shade) * glow,
+            shade * 0.97 + (ACCENT[1] - shade) * glow,
+            shade * 0.94 + (ACCENT[2] - shade) * glow,
+        ];
+        let mut over = |rgb: [f64; 3], alpha: f64| {
+            for k in 0..3 {
+                c[k] += (rgb[k] - c[k]) * alpha;
+            }
+        };
+        for (radius, alpha) in [(0.15, 0.5), (0.21, 0.28)] {
+            if (r - radius).abs() <= 0.008 {
+                over(ACCENT, alpha);
+            }
+        }
+        // Each funnel's trail: an arc of the orbit behind it, thinning and fading.
+        let theta = y.atan2(x);
+        for i in 0..FUNNELS {
+            let behind = (start + i as f64 * step - theta).rem_euclid(std::f64::consts::TAU);
+            if behind < TRAIL {
+                let left = 1.0 - behind / TRAIL;
+                if (r - ORBIT).abs() <= 0.016 * left {
+                    over(ACCENT, 0.6 * left);
+                }
+            }
+        }
+        if funnels.iter().any(|t| in_triangle(x, y, t)) {
+            over(ACCENT, 1.0);
+        }
+        if r <= 0.085 {
+            // The core, hot white in the middle.
+            let heat = (1.0 - r / 0.085).powf(1.5);
+            over([255.0, 236.0, 222.0], heat * 0.85);
+            over(ACCENT, 1.0 - heat * 0.85);
+        }
+        c
+    };
+    const GRID: usize = 4;
     let mut raw = Vec::with_capacity((size * (size * 3 + 1)) as usize);
-    for y in 0..size {
+    for py in 0..size {
         raw.push(0);
-        for x in 0..size {
-            raw.extend_from_slice(if on(x as f64 + 0.5, y as f64 + 0.5) {
-                &fg
-            } else {
-                &bg
-            });
+        for px in 0..size {
+            let mut sum = [0.0; 3];
+            for sy in 0..GRID {
+                for sx in 0..GRID {
+                    let x = (px as f64 + (sx as f64 + 0.5) / GRID as f64) / s - 0.5;
+                    let y = (py as f64 + (sy as f64 + 0.5) / GRID as f64) / s - 0.5;
+                    let c = sample(x, y);
+                    for k in 0..3 {
+                        sum[k] += c[k];
+                    }
+                }
+            }
+            for v in sum {
+                raw.push((v / (GRID * GRID) as f64).round().clamp(0.0, 255.0) as u8);
+            }
         }
     }
     let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
