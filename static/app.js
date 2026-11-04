@@ -501,7 +501,32 @@ function defaultDictationLang() {
 // rec: the running recognizer; before/after: the text around the dictated part; original: the text
 // before dictation began, for cancel; started: Date.now() at start, for the timer.
 // more: keep listening after the recognizer ends (single-utterance mode, see ONE_UTTERANCE).
-const dictation = { rec: null, lang: "", before: "", after: "", original: "", started: 0, timer: 0, more: false };
+// events/error/gotText: what the browser reported during this dictation, shown as a note when it ends
+// without text, since engines fail quietly (iOS Home Screen apps, dictation turned off in Settings).
+const dictation = { rec: null, lang: "", before: "", after: "", original: "", started: 0, timer: 0, more: false,
+  events: [], error: "", gotText: false, note: "", noteTimer: 0 };
+
+function noteEvent(name) {
+  if (dictation.events[dictation.events.length - 1] !== name) dictation.events.push(name);
+}
+
+// Shown in the bar for a while after a dictation that typed nothing.
+function showDictationNote() {
+  const hints = {
+    "no-speech": "No speech was heard.",
+    "audio-capture": "The microphone could not be used; another app may have it.",
+    "network": "The speech service could not be reached.",
+    "not-allowed": "Microphone access was denied; allow it for this site.",
+    "service-not-allowed": "Speech recognition is turned off or unavailable here. On iPhone, turn on Settings › General › Keyboard › Enable Dictation.",
+    "language-not-supported": "This browser cannot recognize " + dictation.lang + "; tap the language button next time to pick another.",
+  };
+  let msg = "Nothing was recognized. " + (hints[dictation.error] || (dictation.error ? "Error: " + dictation.error + "." : ""));
+  if (navigator.standalone) msg += " Home Screen apps on iOS may not get speech recognition; try the page in Safari, or the keyboard's dictation key.";
+  dictation.note = msg + " [" + dictation.events.join(" › ") + "]";
+  clearTimeout(dictation.noteTimer);
+  dictation.noteTimer = setTimeout(() => { dictation.note = ""; renderDictation(); }, 12000);
+  renderDictation();
+}
 // Android Chrome's continuous mode repeats earlier words in later results, reworded or repunctuated so
 // that no text comparison can drop them. There a recognizer hears one utterance, and the next starts
 // after the caret when it ends, until the user stops or falls silent.
@@ -519,6 +544,7 @@ function dictationBar() {
   };
   const cancel = el("button", { className: "cancel", title: "Cancel dictation", textContent: "✕" });
   cancel.onclick = () => {
+    if (!dictation.rec) { dictation.note = ""; renderDictation(); return; }
     const original = dictation.original;
     stopDictation(true);
     $("input").value = original;
@@ -539,7 +565,9 @@ function dictationBar() {
 function renderDictation() {
   const bar = dictationBar();
   const on = !!dictation.rec;
-  bar.hidden = !on;
+  bar.hidden = !on && !dictation.note;
+  bar.classList.toggle("note", !on && !!dictation.note);
+  if (!on && dictation.note) bar.querySelector(".status").textContent = dictation.note;
   $("composer").classList.toggle("dictating", on);
   $("micBtn").classList.toggle("on", on);
   $("micBtn").title = on ? "Stop dictation" : "Dictate";
@@ -600,6 +628,8 @@ function listen() {
   rec.onresult = (e) => {
     if (dictation.rec !== rec) return;
     const text = mergeTranscripts(Array.from(e.results, (r) => r[0].transcript));
+    noteEvent("result");
+    if (text.trim()) dictation.gotText = true;
     // Words in languages written with spaces need one between them and the text before.
     const gap = text && dictation.before && !/\s$/.test(dictation.before) && !/^\s/.test(text) && !/^(zh|ja|ko)\b/i.test(rec.lang) ? " " : "";
     input.value = dictation.before + gap + text + dictation.after;
@@ -608,26 +638,28 @@ function listen() {
     growInput();
     setHearing(true);
   };
-  rec.onspeechstart = () => { if (dictation.rec === rec) setHearing(true); };
+  rec.onspeechstart = () => { if (dictation.rec === rec) { noteEvent("speech"); setHearing(true); } };
   rec.onspeechend = () => { if (dictation.rec === rec) setHearing(false); };
+  rec.onstart = () => noteEvent("start");
+  rec.onaudiostart = () => noteEvent("audio");
+  rec.onsoundstart = () => noteEvent("sound");
+  rec.onnomatch = () => noteEvent("nomatch");
   rec.onerror = (e) => {
     if (dictation.rec !== rec) return;
-    dictation.more = false;  // silence ("no-speech") also ends dictation
-    if (e.error === "no-speech" || e.error === "aborted") return;
-    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
-      alert("Speech recognition is not allowed here. Allow the microphone for this site, or use the keyboard's dictation key.");
-    } else if (e.error === "language-not-supported") {
-      alert("This browser cannot recognize " + rec.lang + ". Tap the language button to pick another.");
-    } else alert("Dictation failed: " + e.error);
+    noteEvent("error");
+    dictation.error = e.error;
+    dictation.more = false;  // silence ("no-speech") also ends dictation; onend shows why
   };
   rec.onend = () => {
     if (dictation.rec !== rec) return;
     if (ONE_UTTERANCE && dictation.more) { listen(); return; }  // the caret is after the last utterance
+    noteEvent("end");
     dictation.rec = null;
-    renderDictation();
+    if (!dictation.gotText) showDictationNote();
+    else renderDictation();
   };
   dictation.rec = rec;
-  try { rec.start(); } catch (e) { dictation.rec = null; }
+  try { rec.start(); } catch (e) { dictation.rec = null; dictation.error = e.message; showDictationNote(); return; }
   setHearing(false);
   renderDictation();
 }
@@ -637,6 +669,7 @@ function startDictation() {
   dictation.original = $("input").value;
   dictation.started = Date.now();
   dictation.more = true;
+  Object.assign(dictation, { events: [], error: "", gotText: false, note: "" });
   listen();
 }
 
