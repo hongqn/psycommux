@@ -44,7 +44,7 @@ async fn api_requires_token() {
 }
 
 #[tokio::test]
-async fn login_sets_strict_http_only_cookie() {
+async fn login_sets_lax_http_only_cookie() {
     let h = Harness::new().await;
     let resp = h
         .request("GET", &format!("/login?token={TOKEN}"), None, &[], false)
@@ -53,7 +53,9 @@ async fn login_sets_strict_http_only_cookie() {
     let cookie = resp.header("set-cookie").unwrap();
     assert!(cookie.contains(&format!("{COOKIE_NAME}={TOKEN}")));
     assert!(cookie.contains("HttpOnly"));
-    assert!(cookie.contains("SameSite=Strict"));
+    // Lax, not Strict: an iOS Home Screen app launched cold opens "/" as if
+    // from outside the site, and would get the login page without the cookie.
+    assert!(cookie.contains("SameSite=Lax"));
     assert!(!cookie.contains("Secure"));
     assert_eq!(
         h.request("GET", "/login?token=wrong", None, &[], false)
@@ -76,8 +78,8 @@ async fn login_sets_strict_http_only_cookie() {
 #[tokio::test]
 async fn login_continues_with_a_same_site_navigation() {
     // Opening the link from the iPhone camera is a cross-site navigation, and an
-    // HTTP redirect stays part of it, so Safari would not send the new
-    // SameSite=Strict cookie to "/" and show the login page again.
+    // HTTP redirect stays part of it; finishing on a page-started navigation
+    // keeps the cookie from depending on how the browser treats that redirect.
     let h = Harness::new().await;
     let resp = h
         .request("GET", &format!("/login?token={TOKEN}"), None, &[], false)

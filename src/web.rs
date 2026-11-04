@@ -525,7 +525,7 @@ fn authorized(state: &AppState, headers: &HeaderMap) -> bool {
         .is_some_and(|p| !p.is_empty() && constant_time_eq(p.as_bytes(), state.token.as_bytes()))
 }
 
-/// CSRF guard for state-changing requests (on top of SameSite=Strict).
+/// CSRF guard for state-changing requests (on top of SameSite=Lax, which keeps the cookie off cross-site POSTs).
 fn same_origin(state: &AppState, headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
         // Non-browser clients (curl with a bearer token) send no Origin.
@@ -1193,9 +1193,11 @@ fn login(state: &AppState, headers: &HeaderMap, query: &str) -> Response<Body> {
         ""
     };
     // Not an HTTP redirect: a link opened from another app (the iPhone camera,
-    // Messages) is a cross-site navigation, a redirect stays part of it, and
-    // Safari would not send the SameSite=Strict cookie to "/". A navigation
-    // started by this page is same-site, so the cookie goes along.
+    // Messages) is a cross-site navigation and a redirect stays part of it. A
+    // navigation started by this page is same-site, so the cookie goes along.
+    // The cookie is Lax rather than Strict because an iOS Home Screen app
+    // launched cold opens "/" as if from outside the site, and Strict would
+    // send it to the login page each time.
     let html = concat!(
         "<!doctype html><meta http-equiv=\"refresh\" content=\"0;url=/\">",
         "<title>psycommux</title>",
@@ -1204,7 +1206,7 @@ fn login(state: &AppState, headers: &HeaderMap, query: &str) -> Response<Body> {
         "<a href=/ style='color:#d97757'>Continue</a>",
     );
     let cookie = format!(
-        "{COOKIE_NAME}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000{secure}",
+        "{COOKIE_NAME}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000{secure}",
         state.token
     );
     Response::builder()

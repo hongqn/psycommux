@@ -149,9 +149,11 @@ curl -H "Authorization: Bearer $PSYCOMMUX_TOKEN" http://127.0.0.1:8787/api/tree
 ## Security
 
 - Every API route needs the token (cookie or bearer), compared in constant time.
-- The cookie is `HttpOnly; SameSite=Strict` (`Secure` over HTTPS).
-  State-changing requests must be JSON POSTs from the same origin, or carry no
-  `Origin`, as from curl.
+- The cookie is `HttpOnly; SameSite=Lax` (`Secure` over HTTPS). Not
+  `Strict`: an iOS Home Screen app launched cold opens the page as if from
+  another site, and would ask for the token every time. State-changing
+  requests must be JSON POSTs from the same origin, or carry no `Origin`, as
+  from curl.
 - The token never appears in the log.
 - Transcript paths stay on the server; the page names sessions by the ids cmux
   reports.
