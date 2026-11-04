@@ -500,14 +500,18 @@ function defaultDictationLang() {
 }
 // rec: the running recognizer; before/after: the text around the dictated part; original: the text
 // before dictation began, for cancel; started: Date.now() at start, for the timer.
-// more: keep listening after the recognizer ends (single-utterance mode, see ONE_UTTERANCE).
+// on: the user is dictating; running: the recognizer is between start() and its end event; again: start
+// another session when it ends (next utterance, new language); discard: ignore the running session.
 // events/error/gotText: what the browser reported during this dictation, shown as a note when it ends
-// without text, since engines fail quietly (iOS Home Screen apps, dictation turned off in Settings).
-const dictation = { rec: null, lang: "", before: "", after: "", original: "", started: 0, timer: 0, more: false,
-  events: [], error: "", gotText: false, note: "", noteTimer: 0 };
+// without text, since engines fail quietly (dictation turned off in Settings, Apple's recognizer failing).
+const dictation = { on: false, running: false, again: false, discard: false, lang: "", before: "", after: "", original: "", started: 0, timer: 0,
+  events: [], error: "", errorMessage: "", gotText: false, note: "", noteTimer: 0 };
 
+// Each event once in a row, with the seconds since dictation began.
 function noteEvent(name) {
-  if (dictation.events[dictation.events.length - 1] !== name) dictation.events.push(name);
+  const last = dictation.events[dictation.events.length - 1];
+  if (last && last.split(" ")[0] === name) return;
+  dictation.events.push(name + " " + ((Date.now() - dictation.started) / 1000).toFixed(1) + "s");
 }
 
 // Shown in the bar for a while after a dictation that typed nothing.
@@ -521,7 +525,7 @@ function showDictationNote() {
     "language-not-supported": "This browser cannot recognize " + dictation.lang + "; tap the language button next time to pick another.",
   };
   let msg = "Nothing was recognized. " + (hints[dictation.error] || (dictation.error ? "Error: " + dictation.error + "." : ""));
-  if (navigator.standalone) msg += " Home Screen apps on iOS may not get speech recognition; try the page in Safari, or the keyboard's dictation key.";
+  if (dictation.errorMessage) msg += " (" + dictation.errorMessage + ")";
   dictation.note = msg + " [" + dictation.events.join(" › ") + "]";
   clearTimeout(dictation.noteTimer);
   dictation.noteTimer = setTimeout(() => { dictation.note = ""; renderDictation(); }, 12000);
@@ -540,11 +544,12 @@ function dictationBar() {
     const i = DICTATION_LANGS.findIndex(([code]) => code === dictation.lang);
     dictation.lang = DICTATION_LANGS[(i + 1) % DICTATION_LANGS.length][0];
     save("cmuxDictationLang", dictation.lang);
-    listen();  // restart in the new language, keeping what was recognized so far
+    dictation.again = true;
+    listen();  // stops the session; the next starts in the new language after what was recognized
   };
   const cancel = el("button", { className: "cancel", title: "Cancel dictation", textContent: "✕" });
   cancel.onclick = () => {
-    if (!dictation.rec) { dictation.note = ""; renderDictation(); return; }
+    if (!dictation.on) { dictation.note = ""; renderDictation(); return; }
     const original = dictation.original;
     stopDictation(true);
     $("input").value = original;
@@ -564,7 +569,7 @@ function dictationBar() {
 
 function renderDictation() {
   const bar = dictationBar();
-  const on = !!dictation.rec;
+  const on = dictation.on;
   bar.hidden = !on && !dictation.note;
   bar.classList.toggle("note", !on && !!dictation.note);
   if (!on && dictation.note) bar.querySelector(".status").textContent = dictation.note;
@@ -605,28 +610,17 @@ function mergeTranscripts(parts) {
   return text.replace(/^\s+/, "");
 }
 
-// Stopping lets the last words arrive; cancelling (on send, cancel or leaving the view) drops them.
-function stopDictation(cancel) {
-  const rec = dictation.rec;
-  if (!rec) return;
-  dictation.more = false;
-  if (cancel) { dictation.rec = null; rec.abort(); renderDictation(); } else rec.stop();
-}
+// One recognizer for the page, started again for each dictation; a session starts only after the last
+// one's end event, never over it.
+let recognizer = null;
 
-// Start (or restart) a recognizer in dictation.lang that types at the caret.
-function listen() {
-  const input = $("input");
-  const old = dictation.rec;
-  dictation.rec = null;
-  if (old) old.abort();
-  const rec = new Speech();
-  rec.lang = dictation.lang;
-  rec.continuous = !ONE_UTTERANCE;
+function getRecognizer() {
+  if (recognizer) return recognizer;
+  const rec = recognizer = new Speech();
   rec.interimResults = true;
-  dictation.before = input.value.slice(0, input.selectionStart);
-  dictation.after = input.value.slice(input.selectionEnd);
   rec.onresult = (e) => {
-    if (dictation.rec !== rec) return;
+    if (dictation.discard) return;
+    const input = $("input");
     const text = mergeTranscripts(Array.from(e.results, (r) => r[0].transcript));
     noteEvent("result");
     if (text.trim()) dictation.gotText = true;
@@ -638,28 +632,60 @@ function listen() {
     growInput();
     setHearing(true);
   };
-  rec.onspeechstart = () => { if (dictation.rec === rec) { noteEvent("speech"); setHearing(true); } };
-  rec.onspeechend = () => { if (dictation.rec === rec) setHearing(false); };
+  rec.onspeechstart = () => { if (!dictation.discard) { noteEvent("speech"); setHearing(true); } };
+  rec.onspeechend = () => { if (!dictation.discard) setHearing(false); };
   rec.onstart = () => noteEvent("start");
   rec.onaudiostart = () => noteEvent("audio");
   rec.onsoundstart = () => noteEvent("sound");
   rec.onnomatch = () => noteEvent("nomatch");
   rec.onerror = (e) => {
-    if (dictation.rec !== rec) return;
+    if (dictation.discard) return;
     noteEvent("error");
     dictation.error = e.error;
-    dictation.more = false;  // silence ("no-speech") also ends dictation; onend shows why
+    // Safari reports most failures of Apple's recognizer as "aborted", with the reason only in message.
+    dictation.errorMessage = e.message || "";
+    dictation.again = false;  // silence ("no-speech") also ends dictation; the note says why
   };
   rec.onend = () => {
-    if (dictation.rec !== rec) return;
-    if (ONE_UTTERANCE && dictation.more) { listen(); return; }  // the caret is after the last utterance
+    dictation.running = false;
+    if (dictation.on && dictation.again) { listen(); return; }
+    if (dictation.discard) return;  // cancelled: already shown as off
     noteEvent("end");
-    dictation.rec = null;
+    dictation.on = false;
     if (!dictation.gotText) showDictationNote();
     else renderDictation();
   };
-  dictation.rec = rec;
-  try { rec.start(); } catch (e) { dictation.rec = null; dictation.error = e.message; showDictationNote(); return; }
+  return rec;
+}
+
+// Stopping lets the last words arrive; cancelling (on send, cancel or leaving the view) drops them.
+function stopDictation(cancel) {
+  if (!dictation.on) return;
+  dictation.again = false;
+  if (cancel) {
+    dictation.on = false;
+    dictation.discard = true;
+    if (dictation.running) recognizer.abort();
+    renderDictation();
+  } else if (dictation.running) recognizer.stop();
+}
+
+// Start a session in dictation.lang that types at the caret, now or when the running one ends.
+function listen() {
+  if (dictation.running) { dictation.again = true; recognizer.stop(); return; }
+  const input = $("input");
+  const rec = getRecognizer();
+  rec.lang = dictation.lang;
+  // Android Chrome repeats earlier words in continuous mode; there each session is one utterance.
+  rec.continuous = !ONE_UTTERANCE;
+  dictation.again = ONE_UTTERANCE;
+  dictation.discard = false;
+  dictation.before = input.value.slice(0, input.selectionStart);
+  dictation.after = input.value.slice(input.selectionEnd);
+  try { rec.start(); } catch (e) {
+    dictation.on = false; dictation.error = e.message; showDictationNote(); return;
+  }
+  dictation.running = true;
   setHearing(false);
   renderDictation();
 }
@@ -668,14 +694,17 @@ function startDictation() {
   dictation.lang = defaultDictationLang();
   dictation.original = $("input").value;
   dictation.started = Date.now();
-  dictation.more = true;
-  Object.assign(dictation, { events: [], error: "", gotText: false, note: "" });
+  Object.assign(dictation, { on: true, events: [], error: "", errorMessage: "", gotText: false, note: "" });
   listen();
 }
 
-$("micBtn").hidden = !Speech;
+// iOS hears only the first dictation after the page loads (WebKit bugs 317741 and 321436), so there
+// the button stays hidden and the keyboard's own dictation key, which works, is the way to dictate.
+// iPadOS reports itself as a Mac; touch tells them apart.
+const IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+$("micBtn").hidden = !Speech || IOS;
 $("micBtn").addEventListener("pointerdown", (e) => { if (document.activeElement === $("input")) e.preventDefault(); });
-$("micBtn").onclick = () => (dictation.rec ? stopDictation(false) : startDictation());
+$("micBtn").onclick = () => (dictation.on ? stopDictation(false) : startDictation());
 
 // ---- composer -------------------------------------------------------------------------------
 const TERMINAL_KEYS = [["Enter", "enter"], ["Esc", "escape"], ["Ctrl-C", "ctrl+c"], ["Tab", "tab"], ["⇧Tab", "shift+tab"], ["↑", "up"], ["↓", "down"], ["←", "left"], ["→", "right"], ["Ctrl-D", "ctrl+d"], ["PgUp", "pageup"], ["PgDn", "pagedown"]];

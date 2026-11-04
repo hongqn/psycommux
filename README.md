@@ -29,8 +29,9 @@ swarm of remote funnels: here, one phone steering many coding agents.
   Safari to Apple). It starts in Chinese when Chinese is among the system
   languages; a button on the recording bar switches language, and ✕ restores
   the text from before. Review the text, then send. The button is hidden where
-  the browser has no speech recognition; the keyboard's own dictation key
-  works there too.
+  the browser has no speech recognition, and on iPhone and iPad, where WebKit
+  hears only the first dictation after the page loads (WebKit bugs 317741 and
+  321436); use the keyboard's own dictation key there.
 - **Notifications** in a list laid out like cmux's, with browser
   notifications; opening an item marks its notifications read.
 
