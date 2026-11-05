@@ -189,3 +189,7 @@ call `curl`.
 
 psycommux began as the `examples/cmux-web-remote` prototype in the cmux
 repository, written in Python.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
