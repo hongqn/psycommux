@@ -7,6 +7,9 @@ const $ = (id) => document.getElementById(id);
 const PHONE = matchMedia("(max-width: 900px)");
 const saved = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch (e) { return fallback; } };
 const save = (key, value) => localStorage.setItem(key, JSON.stringify(value));
+// Browser panels open in reader mode unless switched to the screenshot; these are the switched ones.
+const shotView = new Set(saved("browserShot", []));
+const readerOn = { has: (id) => !shotView.has(id) };
 
 const state = {
   tree: null,
@@ -227,9 +230,12 @@ function renderMain() {
   const root = $("view");
   root.replaceChildren();
   $("urlbar").hidden = view !== "browser";
+  const reading = view === "browser" && readerOn.has(surface.id);
+  $("readerBtn").classList.toggle("on", reading);
+  $("readerBtn").title = reading ? "Show the screenshot" : "Reader view";
   if (view === "chat") mountChat(surface, root);
   else if (view === "terminal") mountTerminal(surface, root);
-  else if (view === "browser") mountBrowser(surface, root);
+  else if (view === "browser") (readerOn.has(surface.id) ? mountReader : mountBrowser)(surface, root);
   else if (view === "file") mountFile(surface, root);
   else if (view === "new") mountNew(root);
   else if (view === "starting") root.append(el("div", { className: "empty" }, el("div", { className: "spin", style: "margin:0 auto 10px" }), "Starting Claude…"));
@@ -244,6 +250,8 @@ function unmountView() {
   if (state.browser) {
     state.browser.abort.abort();
     api("/api/browser/release", { surface_id: state.browser.sid }).catch(() => {});
+    cancelAnimationFrame(state.browser.glide);
+    if (state.browser.objectUrl) URL.revokeObjectURL(state.browser.objectUrl);
     state.browser = null;
   }
   if (state.file) { state.file.abort.abort(); state.file = null; }
@@ -270,7 +278,7 @@ function renderHeader(ws, surface, view) {
     more.onclick = (e) => {
       e.stopPropagation();
       const entries = [["Show on Mac", async () => { await api("/api/workspace/select", { workspace_id: ws.id }); scheduleTree(100); }]];
-      if (surface && surface.type === "browser" && surface.url) entries.push(["Open on this device", () => window.open(surface.url, "_blank", "noopener")]);
+      if (surface && surface.type === "browser" && pageUrl(surface)) entries.push(["Open on this device", () => openHere(surface)]);
       showMenu(more, entries);
     };
     actions.append(more);
@@ -326,27 +334,53 @@ function mountTerminal(surface, root) {
 }
 
 // ---- view: browser ------------------------------------------------------------------
+// A live screenshot of the Mac's browser panel. Taps click there; drags scroll there, while the
+// screenshot moves with the finger at once and settles as screenshots of the scrolled page arrive.
 function mountBrowser(surface, root) {
   const img = el("img", { className: "shot", alt: "", draggable: false });
   const note = el("div", { className: "shot-note", textContent: "Loading page…" });
   const wrap = el("div", { className: "shot-wrap" }, img, note);
   root.append(wrap);
   $("url").value = surface.url || "";
-  const b = state.browser = { sid: surface.id, img, wrap, note, hash: "", fast: 0, abort: new AbortController() };
-  img.onload = () => { note.hidden = true; };
+  // offset: how far the screenshot is shifted (screen px): finger movement the shown screenshot does
+  // not include yet. pending: movement not sent yet. acked: scrolls the page made, each with when it
+  // made it, until a screenshot asked for after that shows them.
+  const b = state.browser = {
+    sid: surface.id, img, wrap, note, hash: "", fast: 0, abort: new AbortController(), objectUrl: "",
+    offset: { x: 0, y: 0 }, pending: { x: 0, y: 0 }, origin: null, sending: false, acked: [], glide: 0,
+  };
   attachBrowserGestures(b);
   browserLoop(b);
+}
+
+async function fetchShot(b) {
+  const box = b.wrap.getBoundingClientRect();
+  const res = await fetch("/api/browser/shot", {
+    method: "POST", headers: { "Content-Type": "application/json" }, signal: b.abort.signal,
+    body: JSON.stringify({ surface_id: b.sid, hash: b.hash, width: Math.round(box.width), height: Math.round(box.height) }),
+  });
+  if (res.status === 401) { location.href = "/"; throw new Error("unauthorized"); }
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.message || data.error || res.statusText);
+  }
+  let url = res.headers.get("x-page-url") || "";
+  try { url = decodeURI(url); } catch (e) { /* keep it encoded */ }
+  return { hash: res.headers.get("x-shot-hash") || "", url, blob: res.status === 204 ? null : await res.blob() };
 }
 
 async function browserLoop(b) {
   while (state.browser === b) {
     await untilVisible(b);
     if (state.browser !== b) return;
-    const box = b.wrap.getBoundingClientRect();
+    const asked = performance.now();
     try {
-      const r = await api("/api/browser/shot", { surface_id: b.sid, hash: b.hash, width: Math.round(box.width), height: Math.round(box.height) }, b.abort.signal);
+      const r = await fetchShot(b);
       if (state.browser !== b) return;
-      if (r.png) { b.img.src = "data:image/png;base64," + r.png; b.hash = r.hash; }
+      if (r.blob) await showShot(b, r.blob);
+      b.hash = r.hash;
+      settleScroll(b, asked);
+      if (r.url) b.url = r.url;
       if (r.url && document.activeElement !== $("url")) $("url").value = r.url;
     } catch (e) {
       if (state.browser !== b || e.name === "AbortError") return;
@@ -354,8 +388,75 @@ async function browserLoop(b) {
       b.note.textContent = "Browser unavailable: " + e.message;
       await sleep(3000);
     }
-    await sleep(Date.now() < b.fast ? 350 : 1500);
+    await sleep(Date.now() < b.fast ? 150 : 1500);
   }
+}
+
+function showShot(b, blob) {
+  const url = URL.createObjectURL(blob);
+  return new Promise((done) => {
+    b.img.onload = b.img.onerror = (e) => {
+      if (b.objectUrl) URL.revokeObjectURL(b.objectUrl);
+      b.objectUrl = url;
+      b.note.hidden = e.type === "load";
+      if (e.type === "error") b.note.textContent = "The screenshot did not load.";
+      done();
+    };
+    b.img.src = url;
+  });
+}
+
+// A screenshot asked for at `asked` shows every scroll the page made before then.
+function settleScroll(b, asked) {
+  const shown = b.acked.filter((a) => a.at < asked);
+  if (!shown.length) return;
+  b.acked = b.acked.filter((a) => a.at >= asked);
+  for (const a of shown) { b.offset.x -= a.x; b.offset.y -= a.y; }
+  placeShot(b);
+}
+
+function placeShot(b) {
+  b.img.style.transform = b.offset.x || b.offset.y ? `translate(${b.offset.x}px, ${b.offset.y}px)` : "";
+}
+
+// Where the screenshot sits without its shift: the page's viewport as it is now.
+function shotRect(b) {
+  const r = b.img.getBoundingClientRect();
+  return { left: r.left - b.offset.x, top: r.top - b.offset.y, width: r.width, height: r.height };
+}
+
+// The finger moved the content by (dx, dy) screen px.
+function dragShot(b, dx, dy) {
+  b.offset.x += dx; b.offset.y += dy;
+  b.pending.x += dx; b.pending.y += dy;
+  placeShot(b);
+  sendScroll(b);
+}
+
+// One scroll request at a time; movement made meanwhile goes in the next, so scrolls keep pace with
+// the round trip. The page answers how far it moved; what it could not (an edge) springs back.
+async function sendScroll(b) {
+  if (b.sending || !b.origin || (!b.pending.x && !b.pending.y)) return;
+  const r = shotRect(b);
+  if (!r.width || !r.height) return;
+  const sent = b.pending;
+  b.pending = { x: 0, y: 0 };
+  b.sending = true;
+  b.fast = Date.now() + 4000;
+  try {
+    const res = await api("/api/browser/act", { surface_id: b.sid, action: "scroll", fx: b.origin.fx, fy: b.origin.fy, dx: -sent.x / r.width, dy: -sent.y / r.height });
+    const moved = res && res.value && typeof res.value === "object" ? res.value : { dx: -sent.x / r.width, dy: -sent.y / r.height };
+    const did = { x: -moved.dx * r.width, y: -moved.dy * r.height };
+    b.offset.x -= sent.x - did.x; b.offset.y -= sent.y - did.y;
+    b.acked.push({ at: performance.now(), x: did.x, y: did.y });
+  } catch (e) {
+    b.offset.x -= sent.x; b.offset.y -= sent.y;
+    b.note.hidden = false; b.note.textContent = e.message;
+  }
+  b.sending = false;
+  if (state.browser !== b) return;
+  placeShot(b);
+  sendScroll(b);
 }
 
 function browserAct(body) {
@@ -365,46 +466,199 @@ function browserAct(body) {
   return api("/api/browser/act", Object.assign({ surface_id: b.sid }, body)).catch((e) => { b.note.hidden = false; b.note.textContent = e.message; });
 }
 
-// Tap = click at that spot; drag or wheel = scroll the element under the pointer.
+// Tap = click at that spot; drag = scroll the element under where it began, with a glide after a
+// flick; wheel = scroll too.
 function attachBrowserGestures(b) {
   let start = null;
-  const frac = (e) => {
-    const r = b.img.getBoundingClientRect();
-    return { fx: (e.clientX - r.left) / r.width, fy: (e.clientY - r.top) / r.height, r };
+  const frac = (x, y) => {
+    const r = shotRect(b);
+    return { fx: (x - r.left) / r.width, fy: (y - r.top) / r.height, r };
   };
-  b.wrap.addEventListener("pointerdown", (e) => { start = { x: e.clientX, y: e.clientY, moved: false, lastY: e.clientY, lastX: e.clientX }; b.wrap.setPointerCapture(e.pointerId); });
+  const stopGlide = () => { cancelAnimationFrame(b.glide); b.glide = 0; };
+  b.wrap.addEventListener("pointerdown", (e) => {
+    stopGlide();
+    start = { x: e.clientX, y: e.clientY, lastX: e.clientX, lastY: e.clientY, axis: "", samples: [] };
+    try { b.wrap.setPointerCapture(e.pointerId); } catch (err) { /* not a live pointer */ }
+  });
   b.wrap.addEventListener("pointermove", (e) => {
     if (!start) return;
-    if (Math.abs(e.clientY - start.y) > 8 || Math.abs(e.clientX - start.x) > 8) start.moved = true;
+    if (!start.axis) {
+      const ax = Math.abs(e.clientX - start.x), ay = Math.abs(e.clientY - start.y);
+      if (Math.max(ax, ay) <= 8) return;
+      // Most drags mean one direction; locking it keeps a vertical scroll from wobbling sideways.
+      start.axis = ax > ay * 1.5 ? "x" : ay > ax * 1.5 ? "y" : "xy";
+      const o = frac(start.x, start.y);
+      b.origin = { fx: o.fx, fy: o.fy };
+    }
+    const dx = start.axis === "y" ? 0 : e.clientX - start.lastX;
+    const dy = start.axis === "x" ? 0 : e.clientY - start.lastY;
+    start.lastX = e.clientX; start.lastY = e.clientY;
+    start.samples.push({ t: performance.now(), dx, dy });
+    dragShot(b, dx, dy);
   });
-  b.wrap.addEventListener("pointerup", (e) => {
+  const end = (e) => {
     if (!start) return;
     const s = start; start = null;
-    const { fx, fy, r } = frac(e);
-    if (!r.width || !r.height) return;  // no screenshot yet
-    if (!s.moved) {
-      if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return;
+    if (!s.axis) {
+      if (e.type === "pointercancel") return;
+      const { fx, fy, r } = frac(e.clientX, e.clientY);
+      if (!r.width || !r.height || fx < 0 || fx > 1 || fy < 0 || fy > 1) return;
       const ring = el("div", { className: "tap-ring" });
       ring.style.left = e.clientX - b.wrap.getBoundingClientRect().left + "px";
       ring.style.top = e.clientY - b.wrap.getBoundingClientRect().top + "px";
       b.wrap.append(ring);
       setTimeout(() => ring.remove(), 600);
       browserAct({ action: "tap", fx, fy });
-    } else {
-      const sx = frac({ clientX: s.x, clientY: s.y });
-      browserAct({ action: "scroll", fx: sx.fx, fy: sx.fy, dx: -(e.clientX - s.x) / r.width, dy: -(e.clientY - s.y) / r.height });
+      return;
     }
-  });
-  let wheel = 0, wheelTimer = null, wheelAt = null;
+    // Glide on at the finger's speed over its last 80 ms, slowing down.
+    const now = performance.now();
+    const recent = s.samples.filter((p) => now - p.t < 80);
+    if (!recent.length) return;
+    const span = Math.max(16, now - recent[0].t);
+    let vx = recent.reduce((a, p) => a + p.dx, 0) / span, vy = recent.reduce((a, p) => a + p.dy, 0) / span;
+    if (Math.hypot(vx, vy) < 0.3) return;
+    let last = now;
+    const step = (t) => {
+      const dt = Math.min(32, t - last); last = t;
+      const decay = Math.pow(0.996, dt);
+      vx *= decay; vy *= decay;
+      if (Math.hypot(vx, vy) < 0.05 || state.browser !== b) { b.glide = 0; return; }
+      dragShot(b, vx * dt, vy * dt);
+      b.glide = requestAnimationFrame(step);
+    };
+    b.glide = requestAnimationFrame(step);
+  };
+  b.wrap.addEventListener("pointerup", end);
+  b.wrap.addEventListener("pointercancel", end);
   b.wrap.addEventListener("wheel", (e) => {
     e.preventDefault();
-    wheel += e.deltaY;
-    wheelAt = frac(e);
-    if (!wheelAt.r.height) return;
-    clearTimeout(wheelTimer);
-    wheelTimer = setTimeout(() => { const d = wheel; wheel = 0; browserAct({ action: "scroll", fx: wheelAt.fx, fy: wheelAt.fy, dx: 0, dy: d / wheelAt.r.height }); }, 120);
+    stopGlide();
+    const o = frac(e.clientX, e.clientY);
+    if (!o.r.height) return;
+    b.origin = { fx: o.fx, fy: o.fy };
+    dragShot(b, -e.deltaX, -e.deltaY);
   }, { passive: false });
 }
+
+// ---- view: browser, reader mode ------------------------------------------------------------
+// The page's main content laid out as the phone's own text: sharp at any pixel density and sized
+// for the phone. The server sends a tree of plain tags (see READ_SCRIPT); elements are built from
+// it one by one, never from the page's HTML. Links navigate the Mac's panel, and the new page is
+// read in turn. It is how browser panels open; Aa switches to the screenshot, which is still the
+// way to use forms, and ↗ opens the page in the phone's own browser.
+const READER_TAGS = new Set(["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "blockquote", "a", "strong", "em", "b", "i", "u", "br", "hr", "table", "thead", "tbody", "tfoot", "tr", "th", "td", "figure", "figcaption", "del", "s", "sup", "sub", "dl", "dt", "dd", "kbd", "mark", "code", "pre", "caption", "small", "span", "div"]);
+
+$("readerBtn").onclick = () => {
+  const { surface } = selected();
+  if (!surface || surface.type !== "browser") return;
+  setReader(surface, !readerOn.has(surface.id));
+};
+function setReader(surface, on) {
+  if (on) shotView.delete(surface.id); else shotView.add(surface.id);
+  save("browserShot", [...shotView].slice(-50));
+  state.mounted = "";
+  render();
+};
+
+function mountReader(surface, root) {
+  const note = el("div", { className: "reader-note", textContent: "Reading page…" });
+  const doc = el("div", { className: "doc reader" });
+  root.append(el("div", { className: "reader-wrap" }, note, doc));
+  $("url").value = surface.url || "";
+  const b = state.browser = { sid: surface.id, reader: true, doc, note, hash: "", url: "", fast: 0, abort: new AbortController(), glide: 0, objectUrl: "" };
+  doc.addEventListener("click", (e) => {
+    const a = e.target.closest("a[href]");
+    if (!a) return;
+    e.preventDefault();
+    b.note.hidden = false;
+    b.note.textContent = "Opening…";
+    browserAct({ action: "navigate", url: a.href });
+  });
+  readerLoop(b);
+}
+
+async function readerLoop(b) {
+  while (state.browser === b) {
+    await untilVisible(b);
+    if (state.browser !== b) return;
+    try {
+      const box = b.doc.getBoundingClientRect();
+      const r = await api("/api/browser/act", { surface_id: b.sid, action: "read", hash: b.hash, width: Math.round(box.width), height: Math.round(box.height) }, b.abort.signal);
+      if (state.browser !== b) return;
+      if (!r.same) { b.hash = r.hash; showReader(b, r.page || {}); }
+      if (b.note.textContent !== "Opening…" || !r.same) b.note.hidden = true;
+    } catch (e) {
+      if (state.browser !== b || e.name === "AbortError") return;
+      b.note.hidden = false;
+      b.note.textContent = "Browser unavailable: " + e.message;
+      await sleep(3000);
+    }
+    await sleep(Date.now() < b.fast ? 500 : 3000);
+  }
+}
+
+function showReader(b, page) {
+  const samePage = page.url === b.url;
+  const top = b.doc.scrollTop;
+  if (page.url) b.url = page.url;
+  if (page.url && document.activeElement !== $("url")) $("url").value = page.url;
+  const article = el("article", { className: "msg bot reader-body" });
+  const body = readerNode(page.body);
+  if (body) article.append(body);
+  // The tab title as a heading, unless the page already opens with it.
+  const squash = (t) => (t || "").replace(/\s+/g, "");
+  const title = squash(page.title).slice(0, 16);
+  if (page.title && !article.querySelector("h1") && !squash(article.textContent.slice(0, 600)).includes(title)) {
+    article.prepend(el("h1", { textContent: page.title }));
+  }
+  if (!body) {
+    const surface = { id: b.sid, url: b.url };
+    article.append(el("p", { className: "reader-empty", textContent: "Nothing to read on this page yet." }),
+      el("div", { className: "reader-ways" },
+        el("button", { textContent: "Show the screenshot", onclick: () => setReader(surface, false) }),
+        /^https?:\/\//i.test(b.url) ? el("button", { textContent: "Open on this device ↗", onclick: () => openHere(surface) }) : null));
+  }
+  b.doc.replaceChildren(article);
+  b.doc.scrollTop = samePage ? top : 0;
+}
+
+function readerNode(n) {
+  if (typeof n === "string") return document.createTextNode(n);
+  if (!Array.isArray(n)) return null;
+  const [tag, attrs, ...kids] = n;
+  if (tag === "img") {
+    const src = attrs && typeof attrs.src === "string" ? attrs.src : "";
+    const alt = attrs && typeof attrs.alt === "string" ? attrs.alt : "";
+    // Only https: the page CSP allows no other remote images, and http would be mixed content.
+    if (!/^https:\/\//i.test(src)) return alt ? document.createTextNode(alt) : null;
+    const img = el("img", { alt, loading: "lazy", decoding: "async", referrerPolicy: "no-referrer" });
+    const w = attrs && Number(attrs.w);
+    if (w > 0) img.style.width = w + "px";
+    if (w > 0 && w < 64) img.className = "inline";
+    img.onerror = () => img.replaceWith(alt ? document.createTextNode(alt) : "");
+    img.src = src;
+    return img;
+  }
+  const name = READER_TAGS.has(tag) ? tag : "div";
+  const node = document.createElement(name);
+  if (name === "a" && attrs && /^https?:\/\//i.test(attrs.href || "")) node.href = attrs.href;
+  if (name === "pre") node.className = "code whole";
+  for (const k of kids) { const c = readerNode(k); if (c) node.append(c); }
+  return name === "table" ? el("div", { className: "tablewrap" }, node) : node;
+}
+
+// The page's URL as last seen in a screenshot, which follows the page; the tree's lags behind.
+function pageUrl(surface) {
+  const live = state.browser && state.browser.sid === surface.id && state.browser.url;
+  return live || surface.url || "";
+}
+// Only http(s): the URL comes from the page on the Mac.
+function openHere(surface) {
+  const url = pageUrl(surface);
+  if (/^https?:\/\//i.test(url)) window.open(url, "_blank", "noopener");
+}
+$("openHere").onclick = () => { const { surface } = selected(); if (surface) openHere(surface); };
 
 for (const btn of document.querySelectorAll("#urlbar [data-nav]")) btn.onclick = () => browserAct({ action: btn.dataset.nav });
 $("url").addEventListener("keydown", (e) => {

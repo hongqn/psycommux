@@ -18,9 +18,15 @@ swarm of remote funnels: here, one phone steering many coding agents.
   button stops it. A Terminal switch shows the raw screen.
 - **Terminals** live and in color, with keys (Enter, Esc, Ctrl-C, Tab, ⇧Tab,
   arrows, Ctrl-D, PgUp/PgDn).
-- **Browsers** as a live screenshot rendered at the device's size: tap to
-  click, drag or wheel to scroll, type into the focused field, plus an address
-  bar with back, forward and reload.
+- **Browsers** open in reader view: the page's main content laid out as the
+  phone's own text, sharp and sized for the phone, with links that navigate
+  the panel. The address bar has back, forward and reload, plus **Aa** to
+  switch a panel to its live screenshot and **↗** to open the page in the
+  phone's own browser (with the phone's login, and the site's own mobile
+  layout). The screenshot is rendered at the device's size and sent as
+  lossless WebP: tap to click, drag or wheel to scroll (the screenshot follows
+  the finger at once, glides after a flick and settles as the page catches
+  up), and type into the focused field; it is the way to use forms.
 - **Markdown and file previews** rendered, following the file as it changes.
 - **New session**: pick a folder, optionally describe a task; a new workspace
   starts `claude` there and opens its chat.
@@ -120,7 +126,7 @@ phone ──HTTP/SSE──▶ psycommux ──unix socket──▶ cmux.app
 | `POST /api/screens {surfaces: {id: revision}}` | Waits until any listed terminal changes (`surface.wait_text_change`, or `surface.read_text` polled on older cmux), with colors from `terminal.replay` |
 | `POST /api/send`, `/api/key`, `/api/peek` | `surface.send_text`, `surface.send_key`, `surface.read_text` |
 | `POST /api/chat/{history,poll,send,interrupt} {session_id}` | The session's transcript, read backwards in pages and forward from a byte offset; `mobile.chat.send` / `mobile.chat.interrupt` |
-| `POST /api/browser/{shot,act,release}` | `browser.screenshot`, `browser.viewport.set`, `browser.eval`, `browser.press`, `browser.navigate` |
+| `POST /api/browser/{shot,act,release}` | `browser.screenshot` (answered as WebP bytes, or 204 when unchanged), `browser.viewport.set`, `browser.eval` (taps, scrolls, typing, reader view), `browser.press`, `browser.navigate` |
 | `POST /api/file {surface_id}` | The file a Markdown or file-preview panel shows |
 | `POST /api/session/new {cwd, prompt?}` | `workspace.create` with `initial_input: "claude '<prompt>'\n"` |
 | `POST /api/workspace/{select,create}` | `workspace.select`, `workspace.create` |
@@ -140,7 +146,10 @@ curl -H "Authorization: Bearer $PSYCOMMUX_TOKEN" http://127.0.0.1:8787/api/tree
   psycommux lays it out at your phone's size with `browser.viewport.set`. The
   Mac shows that panel scaled until you leave, or 20 seconds after the phone
   stops looking. Taps are synthetic clicks through `browser.eval`, so pages
-  that check for trusted input events ignore them.
+  that check for trusted input events ignore them. Screenshots of an emulated
+  viewport come at one pixel per CSS pixel, so they are softer than the
+  phone's screen; cmux has no sharper capture, and WKWebView has no screencast
+  or real input events.
 - The socket does not say which file a Markdown panel shows, so psycommux
   reads `filePath` from cmux's saved session
   (`~/Library/Application Support/cmux/session-com.cmuxterm.app.json`). That is
@@ -159,6 +168,12 @@ curl -H "Authorization: Bearer $PSYCOMMUX_TOKEN" http://127.0.0.1:8787/api/tree
 - Transcript paths stay on the server; the page names sessions by the ids cmux
   reports.
 - The browser address bar accepts only http and https URLs.
+- Reader view never parses the page's HTML: the page returns a tree of plain
+  tags with only http(s) link targets and image sources, and the phone builds
+  elements from it, so no script or style from the page runs on psycommux's
+  origin. Its images load straight from their https URLs (the page's CSP
+  allows `img-src https:` for that), without a referrer; images that need the
+  Mac's login show their alt text instead.
 - `/api/send` skips the "don't type over an agent's prompt draft" check that
   `cmux send` does. Check the screen before you send.
 

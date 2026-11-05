@@ -183,7 +183,7 @@ async fn assets_and_csp() {
     assert!(page
         .header("content-security-policy")
         .unwrap()
-        .contains("img-src 'self' data:"));
+        .contains("img-src 'self' data: blob: https:"));
     assert!(page.text().contains("/assets/app.js"));
 }
 
@@ -917,11 +917,14 @@ async fn browser_shot_holds_the_viewport_and_skips_unchanged_images() {
         )
         .await;
     assert_eq!(first.status, 200);
-    let first = first.json();
+    // The fake's screenshot is only a PNG signature, so it goes out as the PNG it is.
+    assert_eq!(first.header("content-type").as_deref(), Some("image/png"));
+    assert_eq!(&first.body[..], b"\x89PNG\r\n\x1a\n");
     assert_eq!(
-        (first["png"].clone(), first["url"].clone()),
-        (json!("iVBORw0KGgo="), json!("https://example.com/"))
+        first.header("x-page-url").as_deref(),
+        Some("https://example.com/")
     );
+    let hash = first.header("x-shot-hash").unwrap();
     assert_eq!(
         h.fake.last("browser.viewport.set"),
         json!({"surface_id": BROWSER_ID, "width": 390, "height": 700})
@@ -930,11 +933,12 @@ async fn browser_shot_holds_the_viewport_and_skips_unchanged_images() {
     let second = h
         .post(
             "/api/browser/shot",
-            json!({"surface_id": BROWSER_ID, "hash": first["hash"], "width": 390, "height": 700}),
+            json!({"surface_id": BROWSER_ID, "hash": hash, "width": 390, "height": 700}),
         )
-        .await
-        .json();
-    assert!(second.get("png").is_none());
+        .await;
+    assert_eq!(second.status, 204);
+    assert!(second.body.is_empty());
+    assert_eq!(second.header("x-shot-hash"), Some(hash));
     assert_eq!(h.fake.calls_of("browser.viewport.set").len(), sets);
     h.post("/api/browser/release", json!({"surface_id": BROWSER_ID}))
         .await;
@@ -988,6 +992,34 @@ async fn browser_actions() {
     ] {
         assert_eq!(act(bad.clone()).await.status, 400, "{bad}");
     }
+}
+
+#[tokio::test]
+async fn reader_mode_reads_the_page_and_holds_its_viewport() {
+    let h = Harness::new().await;
+    let read = |hash: &str| {
+        h.post(
+            "/api/browser/act",
+            json!({"surface_id": BROWSER_ID, "action": "read", "hash": hash, "width": 390, "height": 700}),
+        )
+    };
+    let first = read("").await;
+    assert_eq!(first.status, 200);
+    let body = first.json();
+    assert_eq!(body["page"], "a");
+    let hash = body["hash"].as_str().unwrap().to_string();
+    let script = h.fake.last("browser.eval")["script"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(script.contains("innerText") && !script.contains("innerHTML"));
+    assert_eq!(
+        h.fake.last("browser.viewport.set"),
+        json!({"surface_id": BROWSER_ID, "width": 390, "height": 700})
+    );
+    let again = read(&hash).await.json();
+    assert_eq!(again["same"], true);
+    assert!(again.get("page").is_none());
 }
 
 #[tokio::test]

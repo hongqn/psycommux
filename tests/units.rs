@@ -369,3 +369,34 @@ fn tls_files() {
         Some("https://100.1.2.3:8787")
     );
 }
+
+#[test]
+fn screenshots_go_out_as_lossless_webp() {
+    use base64::Engine;
+    let png = net::icon_png(16);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+    let (bytes, mime) = psycommux::panels::shot_image(&b64).unwrap();
+    assert_eq!(mime, "image/webp");
+    assert_eq!((&bytes[..4], &bytes[8..12]), (&b"RIFF"[..], &b"WEBP"[..]));
+    // Lossless: decoding gives back every pixel.
+    let back = webp::Decoder::new(&bytes).decode().unwrap();
+    let orig = image::load_from_memory(&png).unwrap().to_rgb8();
+    assert_eq!((back.width(), back.height()), (16, 16));
+    assert_eq!(&*back, orig.as_raw().as_slice());
+    let (bytes, mime) = psycommux::panels::shot_image("iVBORw0KGgo=").unwrap();
+    assert_eq!((mime, &bytes[..]), ("image/png", &b"\x89PNG\r\n\x1a\n"[..]));
+    assert!(psycommux::panels::shot_image("not base64!").is_err());
+}
+
+#[test]
+fn page_urls_fit_in_a_header() {
+    use psycommux::panels::header_safe_url;
+    assert_eq!(
+        header_safe_url("https://a.com/x?q=1#f"),
+        "https://a.com/x?q=1#f"
+    );
+    assert_eq!(
+        header_safe_url("https://a.com/转录 x"),
+        "https://a.com/%E8%BD%AC%E5%BD%95%20x"
+    );
+}

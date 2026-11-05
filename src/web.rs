@@ -42,7 +42,7 @@ const BROWSER_KEYS: [&str; 10] = [
 ];
 const LEASE_SECONDS: u64 = 20;
 const CSP: &str =
-    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:";
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:";
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_JS: &str = include_str!("../static/app.js");
@@ -655,19 +655,73 @@ async fn post(state: &Arc<AppState>, req: Request<Body>) -> Response<Body> {
     if !same_origin(state, headers) {
         return json_response(StatusCode::FORBIDDEN, &json!({"error": "bad_origin"}), None);
     }
-    let result = match read_json(headers, body).await {
-        Ok(body) => dispatch_post(state, parts.uri.path(), &body).await,
-        Err(e) => Err(e),
+    let body = match read_json(headers, body).await {
+        Ok(body) => body,
+        Err(e) => return error_response(&e),
     };
-    match result {
+    if parts.uri.path() == "/api/browser/shot" {
+        return browser_shot(state, &Body_(&body))
+            .await
+            .unwrap_or_else(|e| error_response(&e));
+    }
+    match dispatch_post(state, parts.uri.path(), &body).await {
         Ok(Some(value)) => json_response(StatusCode::OK, &value, Some(headers)),
         Ok(None) => json_response(StatusCode::NOT_FOUND, &json!({"error": "not_found"}), None),
-        Err(e) => json_response(
-            error_status(&e.code),
-            &json!({"error": e.code, "message": e.message}),
-            None,
-        ),
+        Err(e) => error_response(&e),
     }
+}
+
+fn error_response(e: &CmuxError) -> Response<Body> {
+    json_response(
+        error_status(&e.code),
+        &json!({"error": e.code, "message": e.message}),
+        None,
+    )
+}
+
+/// The browser panel's screenshot as image bytes (200), or 204 when it still
+/// matches the `hash` the viewer has. Either way `x-shot-hash` names the
+/// screenshot and `x-page-url` holds the page's URL, percent-encoded.
+async fn browser_shot(state: &Arc<AppState>, body: &Body_<'_>) -> Result<Response<Body>> {
+    let client = &state.client;
+    let surface_id = body.need("surface_id")?;
+    if let (Some(w), Some(h)) = (body.int("width"), body.int("height")) {
+        state.viewports.hold(&surface_id, w, h).await?;
+    }
+    let shot = client
+        .call("browser.screenshot", json!({"surface_id": surface_id}))
+        .await?;
+    let png = shot
+        .get("png_base64")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let digest = panels::shot_hash(&png);
+    let page = client
+        .call("browser.url.get", json!({"surface_id": surface_id}))
+        .await
+        .unwrap_or(Value::Null);
+    let url = or_value(
+        or_value(field(&page, "url"), field(&shot, "page_url")),
+        json!(""),
+    );
+    let url = url.as_str().unwrap_or("");
+    let mut builder = Response::builder()
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("x-shot-hash", &digest)
+        .header("x-page-url", panels::header_safe_url(url));
+    if body.opt_str("hash").as_deref() == Some(digest.as_str()) {
+        return Ok(builder
+            .status(StatusCode::NO_CONTENT)
+            .body(Body::empty())
+            .unwrap());
+    }
+    let (bytes, mime) = tokio::task::spawn_blocking(move || panels::shot_image(&png))
+        .await
+        .map_err(|e| CmuxError::new("error", e.to_string()))?
+        .map_err(|e| CmuxError::new("bad_screenshot", e))?;
+    builder = builder.header(header::CONTENT_TYPE, mime);
+    Ok(builder.body(Body::from(bytes)).unwrap())
 }
 
 async fn read_json(headers: &HeaderMap, body: Body) -> Result<Map<String, Value>> {
@@ -857,35 +911,15 @@ async fn dispatch_post(
             state.viewports.release(&body.need("surface_id")?).await;
             ok()
         }
-        "/api/browser/shot" => {
-            let surface_id = body.need("surface_id")?;
-            if let (Some(w), Some(h)) = (body.int("width"), body.int("height")) {
-                state.viewports.hold(&surface_id, w, h).await?;
-            }
-            let shot = client
-                .call("browser.screenshot", json!({"surface_id": surface_id}))
-                .await?;
-            let png = shot
-                .get("png_base64")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let digest = panels::shot_hash(&png);
-            let page = client
-                .call("browser.url.get", json!({"surface_id": surface_id}))
-                .await
-                .unwrap_or(Value::Null);
-            let url = or_value(
-                or_value(field(&page, "url"), field(&shot, "page_url")),
-                json!(""),
-            );
-            let mut result = json!({"hash": digest, "url": url});
-            if raw.get("hash").and_then(Value::as_str) != Some(digest.as_str()) {
-                result["png"] = json!(png);
-            }
-            result
-        }
         "/api/browser/act" => {
+            // Reader mode keeps the panel laid out at the phone's size, as screenshots do:
+            // the page then shows its mobile layout, and an off-screen panel has one at all.
+            if let (Some(w), Some(h)) = (body.int("width"), body.int("height")) {
+                state
+                    .viewports
+                    .hold(&body.need("surface_id")?, w, h)
+                    .await?;
+            }
             browser_act(
                 client,
                 &body.need("surface_id")?,
@@ -1072,6 +1106,20 @@ async fn browser_act(
                     .await?,
                 ok,
             ));
+        }
+        "read" => {
+            let result = client
+                .call(
+                    "browser.eval",
+                    target(json!({"script": panels::READ_SCRIPT})),
+                )
+                .await?;
+            let page = field(&result, "value");
+            let digest = panels::shot_hash(&page.to_string());
+            if body.opt_str("hash").as_deref() == Some(digest.as_str()) {
+                return Ok(json!({"ok": true, "hash": digest, "same": true}));
+            }
+            return Ok(json!({"ok": true, "hash": digest, "page": page}));
         }
         _ => return Err(CmuxError::new("bad_request", "unknown browser action")),
     };

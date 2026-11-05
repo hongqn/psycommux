@@ -14,6 +14,7 @@ futures-util = "0.3.34"
 glob = "0.3.4"
 hyper = "1.12.0"
 hyper-util = { version = "0.1.21", features = ["tokio", "server-auto", "service"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 qrcode = { version = "0.14.1", default-features = false }
 regex = "1.13.1"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
@@ -26,6 +27,7 @@ tokio = { version = "1.54.1", features = ["full"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio-stream = { version = "0.1.19", features = ["sync"] }
 url = "2.5.8"
+webp = { version = "0.3.1", default-features = false }
 x509-parser = "0.18.1"
 
 [dev-dependencies]
