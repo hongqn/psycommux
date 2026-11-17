@@ -364,7 +364,7 @@ pub fn new_token() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn getrandom(buf: &mut [u8]) {
+pub fn getrandom(buf: &mut [u8]) {
     use std::io::Read;
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(buf))

@@ -1341,3 +1341,241 @@ async fn secret_requests_can_be_declined_and_abandoned() {
         401
     );
 }
+
+// -- Web Push -------------------------------------------------------------------
+
+struct PushedRequest {
+    path: String,
+    headers: std::collections::HashMap<String, String>,
+    body: Vec<u8>,
+}
+
+/// A push service on loopback that answers every message with `status`.
+async fn fake_push_service(
+    status: u16,
+) -> (String, tokio::sync::mpsc::UnboundedReceiver<PushedRequest>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok((mut conn, _)) = listener.accept().await {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 4096];
+                    let n = match conn.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => n,
+                    };
+                    buf.extend_from_slice(&chunk[..n]);
+                    let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&buf[..end]).into_owned();
+                    let mut lines = head.lines();
+                    let path = lines.next().unwrap().split(' ').nth(1).unwrap().to_string();
+                    let headers: std::collections::HashMap<String, String> = lines
+                        .filter_map(|l| l.split_once(':'))
+                        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+                        .collect();
+                    let len: usize = headers["content-length"].parse().unwrap();
+                    while buf.len() < end + 4 + len {
+                        let mut chunk = [0u8; 4096];
+                        let n = conn.read(&mut chunk).await.unwrap();
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let body = buf[end + 4..end + 4 + len].to_vec();
+                    buf.drain(..end + 4 + len);
+                    let _ = tx.send(PushedRequest {
+                        path,
+                        headers,
+                        body,
+                    });
+                    let reply = format!("HTTP/1.1 {status} X\r\ncontent-length: 0\r\n\r\n");
+                    if conn.write_all(reply.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (base, rx)
+}
+
+/// A browser's push subscription: its key pair and auth secret.
+struct Browser {
+    secret: p256::SecretKey,
+    auth: [u8; 16],
+}
+
+impl Browser {
+    fn new() -> Self {
+        let mut bytes = [0u8; 32];
+        psycommux::net::getrandom(&mut bytes);
+        let mut auth = [0u8; 16];
+        psycommux::net::getrandom(&mut auth);
+        Self {
+            secret: p256::SecretKey::from_slice(&bytes).unwrap(),
+            auth,
+        }
+    }
+
+    fn public(&self) -> Vec<u8> {
+        use p256::elliptic_curve::sec1::ToEncodedPoint;
+        self.secret
+            .public_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec()
+    }
+
+    fn subscription(&self, endpoint: &str) -> Value {
+        json!({"endpoint": endpoint, "keys": {"p256dh": b64(&self.public()), "auth": b64(&self.auth)}})
+    }
+
+    /// RFC 8291 decryption, as the browser does it.
+    fn decrypt(&self, body: &[u8]) -> Value {
+        use aes_gcm::aead::{Aead, KeyInit};
+        let salt = &body[..16];
+        let id_len = body[20] as usize;
+        let as_public = &body[21..21 + id_len];
+        let sealed = &body[21 + id_len..];
+        let sender = p256::PublicKey::from_sec1_bytes(as_public).unwrap();
+        let shared =
+            p256::ecdh::diffie_hellman(self.secret.to_nonzero_scalar(), sender.as_affine());
+        let mut info = b"WebPush: info\0".to_vec();
+        info.extend_from_slice(&self.public());
+        info.extend_from_slice(as_public);
+        let mut ikm = [0u8; 32];
+        hkdf::Hkdf::<sha2::Sha256>::new(Some(&self.auth), shared.raw_secret_bytes())
+            .expand(&info, &mut ikm)
+            .unwrap();
+        let content = hkdf::Hkdf::<sha2::Sha256>::new(Some(salt), &ikm);
+        let (mut cek, mut nonce) = ([0u8; 16], [0u8; 12]);
+        content
+            .expand(b"Content-Encoding: aes128gcm\0", &mut cek)
+            .unwrap();
+        content
+            .expand(b"Content-Encoding: nonce\0", &mut nonce)
+            .unwrap();
+        let mut plain = aes_gcm::Aes128Gcm::new_from_slice(&cek)
+            .unwrap()
+            .decrypt(&aes_gcm::Nonce::from(nonce), sealed)
+            .unwrap();
+        assert_eq!(plain.pop(), Some(2));
+        serde_json::from_slice(&plain).unwrap()
+    }
+}
+
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn unb64(text: &str) -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(text)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn cmux_notifications_are_pushed_encrypted_and_signed() {
+    use p256::ecdsa::signature::Verifier;
+    let h = Harness::new().await;
+    let (base, mut pushed) = fake_push_service(201).await;
+    let browser = Browser::new();
+    let endpoint = format!("{base}/push/abc");
+
+    let info = h.request("GET", "/api/push", None, &[], true).await.json();
+    let key = info["key"].as_str().unwrap().to_string();
+    assert_eq!(unb64(&key).len(), 65);
+    assert_eq!(info["subscriptions"], 0);
+    let sub = json!({"subscription": browser.subscription(&endpoint)});
+    let resp = h
+        .request("POST", "/api/push/subscribe", Some(sub), &[], true)
+        .await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.json()["subscriptions"], 1);
+
+    h.state.push.start(&h.hub);
+    h.hub.publish(
+        json!({"type": "event", "name": "notification.created", "notification": {
+        "id": "n1", "title": "Claude Code", "subtitle": "api", "body": "Waiting for input",
+        "workspace_id": WS_ID, "surface_id": SURF_ID}}),
+    );
+    let got = tokio::time::timeout(Duration::from_secs(5), pushed.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.path, "/push/abc");
+    assert_eq!(got.headers["content-encoding"], "aes128gcm");
+    assert_eq!(got.headers["ttl"], "86400");
+    let message = browser.decrypt(&got.body);
+    assert_eq!(message["title"], "Claude Code");
+    assert_eq!(message["body"], "api\nWaiting for input");
+    assert_eq!(message["url"], format!("/?ws={WS_ID}&s={SURF_ID}"));
+
+    // VAPID: a JWT for the push service's origin, signed with the key the page subscribed with.
+    let auth = &got.headers["authorization"];
+    let (t, k) = auth
+        .strip_prefix("vapid t=")
+        .and_then(|rest| rest.split_once(", k="))
+        .unwrap();
+    assert_eq!(k, key);
+    let (signed, signature) = t.rsplit_once('.').unwrap();
+    let claims: Value = serde_json::from_slice(&unb64(signed.split('.').nth(1).unwrap())).unwrap();
+    assert_eq!(claims["aud"], base);
+    let verifier = p256::ecdsa::VerifyingKey::from_sec1_bytes(&unb64(&key)).unwrap();
+    let signature = p256::ecdsa::Signature::from_slice(&unb64(signature)).unwrap();
+    verifier.verify(signed.as_bytes(), &signature).unwrap();
+}
+
+#[tokio::test]
+async fn push_subscriptions_are_checked_and_dropped_when_gone() {
+    let h = Harness::new().await;
+    let browser = Browser::new();
+    let subscribe = |endpoint: &str| json!({"subscription": browser.subscription(endpoint)});
+    let plain = h
+        .request(
+            "POST",
+            "/api/push/subscribe",
+            Some(subscribe("http://push.example/x")),
+            &[],
+            true,
+        )
+        .await;
+    assert_eq!(plain.status, 400);
+
+    let (base, mut pushed) = fake_push_service(410).await;
+    let endpoint = format!("{base}/gone");
+    let ok = h
+        .request(
+            "POST",
+            "/api/push/subscribe",
+            Some(subscribe(&endpoint)),
+            &[],
+            true,
+        )
+        .await;
+    assert_eq!(ok.status, 200);
+    let test = h
+        .request("POST", "/api/push/test", Some(json!({})), &[], true)
+        .await
+        .json();
+    assert_eq!(test["sent"], 0);
+    assert!(pushed.recv().await.is_some());
+    let info = h.request("GET", "/api/push", None, &[], true).await.json();
+    assert_eq!(info["subscriptions"], 0);
+}
+
+#[tokio::test]
+async fn service_worker_is_served_without_login() {
+    let h = Harness::new().await;
+    let resp = h.request("GET", "/sw.js", None, &[], false).await;
+    assert_eq!(resp.status, 200);
+    assert!(resp.header("content-type").unwrap().contains("javascript"));
+    assert!(resp.text().contains("showNotification"));
+}

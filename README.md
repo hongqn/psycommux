@@ -49,8 +49,11 @@ swarm of remote funnels: here, one phone steering many coding agents.
   runs `psycommux secret`; the phone shows the request, and the value you
   paste or autofill there goes straight to the waiting command. See
   [Secrets](#secrets).
-- **Notifications** in a list laid out like cmux's, with browser
-  notifications; opening an item marks its notifications read.
+- **Notifications** in a list laid out like cmux's; opening an item marks its
+  notifications read. With **push** turned on (Notifications > Enable), each
+  new cmux notification reaches the phone while the app is closed, as long as
+  the Mac's screen is locked or it has sat idle for 2 minutes
+  (`--push-always` drops that condition). Tapping one opens its workspace.
 
 One self-contained binary: the page, script and styles are compiled in.
 
@@ -144,6 +147,21 @@ command and nowhere else: psycommux keeps no copy, and neither the page nor
 the server logs it. `--stdout` refuses to print to a terminal. Ask for one
 value per request, and remove `--out` files when they are no longer needed.
 
+## Push notifications
+
+On iPhone, add the page to the Home Screen first (iOS 16.4+) and open it from
+there; on Android, Chrome, Edge and Firefox can subscribe from a plain tab.
+Tap Enable at the bottom of the notifications panel and allow
+notifications; "Send a test" checks the whole path. The page must be served
+over HTTPS, as with Tailscale above.
+
+psycommux sends pushes through the phone's push service (Apple's, for an
+iPhone), encrypted for that phone (RFC 8291) and signed with a key of its own
+(VAPID, RFC 8292), so the push service cannot read them. The key and the
+phones' subscriptions are kept in `~/.psycommux/push.json` (mode 600); delete
+it to start over, and the phones subscribe again the next time they tap
+Enable. A subscription the push service reports gone is dropped.
+
 ## How it works
 
 ```
@@ -165,6 +183,7 @@ phone ──HTTP/SSE──▶ psycommux ──unix socket──▶ cmux.app
 | `POST /api/workspace/{select,create}` | `workspace.select`, `workspace.create` |
 | `GET /api/notifications`, `POST /api/notifications/{read,dismiss,clear_all}` | `notification.*` |
 | `GET /api/secrets`, `POST /api/secrets/{answer,decline} {id, value?}` | Open `psycommux secret` requests; the answer goes back over the local socket, with `notification.create` / `notification.dismiss` around it |
+| `GET /api/push`, `POST /api/push/{subscribe,unsubscribe,test}` | The VAPID public key and this device's Web Push subscription; pushes follow `notification.created` events |
 | `GET /api/events` (SSE) | `events.stream`, with notification bodies looked up (the stream redacts them) |
 
 API calls also accept `Authorization: Bearer <token>`:

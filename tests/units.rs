@@ -400,3 +400,44 @@ fn page_urls_fit_in_a_header() {
         "https://a.com/%E8%BD%AC%E5%BD%95%20x"
     );
 }
+
+#[test]
+fn push_encryption_matches_rfc_8291() {
+    use base64::Engine;
+    let b64 = |s: &str| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(s.replace(' ', ""))
+            .unwrap()
+    };
+    // RFC 8291, section 5 and appendix A.
+    let ua_public = b64(
+        "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+    );
+    let salt: [u8; 16] = b64("DGv6ra1nlYgDCS1FRnbzlw").try_into().unwrap();
+    let body = psycommux::push::encrypt(
+        b"When I grow up, I want to be a watermelon",
+        &ua_public,
+        &b64("BTBZMqHH6r4Tts7J_aSIgg"),
+        &b64("yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw"),
+        &salt,
+    )
+    .unwrap();
+    let expected = b64(
+        "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27ml\
+         mlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPT\
+         pK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN",
+    );
+    assert_eq!(body, expected);
+}
+
+#[test]
+fn a_cmux_notification_as_a_push_message() {
+    let m = psycommux::push::notification_message(&serde_json::json!({
+        "id": "n1", "title": "Claude Code", "subtitle": "api", "body": "Waiting for input",
+        "workspace_id": "W1", "surface_id": "S1",
+    }));
+    assert_eq!(m["title"], "Claude Code");
+    assert_eq!(m["body"], "api\nWaiting for input");
+    assert_eq!(m["tag"], "n1");
+    assert_eq!(m["url"], "/?ws=W1&s=S1");
+}

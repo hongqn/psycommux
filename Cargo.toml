@@ -6,6 +6,7 @@ description = "Drive cmux from your phone: a small server and an installable web
 license = "MIT"
 
 [dependencies]
+aes-gcm = "0.10"
 axum = "0.8.9"
 base64 = "0.23.1"
 bytes = "1.12.1"
@@ -14,9 +15,13 @@ crc32fast = "1.5.4"
 flate2 = "1.1.10"
 futures-util = "0.3.34"
 glob = "0.3.4"
+hkdf = "0.12"
+http-body-util = "0.1.5"
 hyper = "1.12.0"
-hyper-util = { version = "0.1.21", features = ["tokio", "server-auto", "service"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "webpki-tokio", "tls12"] }
+hyper-util = { version = "0.1.21", features = ["tokio", "server-auto", "service", "client-legacy", "http1"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
 qrcode = { version = "0.14.1", default-features = false }
 regex = "1.13.1"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
@@ -24,6 +29,7 @@ rustls-pemfile = "2.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha1_smol = { version = "1.0.1", features = ["std"] }
+sha2 = "0.10"
 similar = "3.2.1"
 tokio = { version = "1.54.1", features = ["full"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
@@ -33,6 +39,5 @@ webp = { version = "0.3.1", default-features = false }
 x509-parser = "0.18.1"
 
 [dev-dependencies]
-http-body-util = "0.1.5"
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }

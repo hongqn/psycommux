@@ -44,6 +44,10 @@ struct Args {
     /// Log every request, not only errors (avoid when the server's own terminal is watched)
     #[arg(long)]
     access_log: bool,
+    /// Push notifications to subscribed phones even while the Mac is in use
+    /// (default: only when its screen is locked or it has sat idle 2 minutes)
+    #[arg(long)]
+    push_always: bool,
 }
 
 #[derive(clap::Subcommand)]
@@ -196,6 +200,21 @@ async fn run(args: Args) -> Result<(), String> {
     state.allowed_origins = origins;
     state.access_log = args.access_log;
     state.tls = tls.is_some();
+    let push_file = psycommux::secrets::socket_path(args.port).with_file_name("push.json");
+    let contact = remote
+        .as_deref()
+        .filter(|r| r.starts_with("https://"))
+        .unwrap_or("mailto:psycommux@localhost");
+    match psycommux::push::Push::open(&push_file, contact, !args.push_always) {
+        Ok(push) => {
+            push.start(&state.hub);
+            state.push = push;
+        }
+        Err(e) => eprintln!(
+            "warning: push notifications are off: cannot use {}: {e}",
+            push_file.display()
+        ),
+    }
     let secret_socket = psycommux::secrets::socket_path(args.port);
     if let Err(e) = state.secrets.listen(&secret_socket) {
         eprintln!("warning: `psycommux secret` will not work: {e}");

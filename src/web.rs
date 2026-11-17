@@ -18,6 +18,7 @@ use crate::cmux::{revisions_from, screen_text, value_text, CmuxClient, CmuxError
 use crate::events::{EventHub, SidebarCache};
 use crate::net::{constant_time_eq, icon_png, netloc, shell_quote};
 use crate::panels::{self, SessionFiles};
+use crate::push::Push;
 use crate::secrets::{SecretRequests, MAX_SECRET_BYTES};
 
 pub const COOKIE_NAME: &str = "psycommux_token";
@@ -48,6 +49,7 @@ const CSP: &str =
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_JS: &str = include_str!("../static/app.js");
 const APP_CSS: &str = include_str!("../static/app.css");
+const SW_JS: &str = include_str!("../static/sw.js");
 
 fn home() -> String {
     std::env::var("HOME").unwrap_or_default()
@@ -482,6 +484,8 @@ pub struct AppState {
     pub viewports: Arc<BrowserViewports>,
     /// Secrets `psycommux secret` waits for, answered from the phone.
     pub secrets: Arc<SecretRequests>,
+    /// Web Push subscriptions of the phones' Home Screen apps.
+    pub push: Arc<Push>,
     pub token: String,
     pub allowed_origins: Vec<String>,
     pub access_log: bool,
@@ -496,6 +500,7 @@ impl AppState {
             files: SessionFiles::new(panels::default_session_glob()),
             viewports: BrowserViewports::new(Arc::clone(&client)),
             secrets: SecretRequests::new(Arc::clone(&client), Arc::clone(&hub)),
+            push: Push::memory(),
             client,
             hub,
             token: token.into(),
@@ -686,6 +691,10 @@ async fn get(state: &Arc<AppState>, req: Request<Body>) -> Response<Body> {
             .clone();
         return bytes_response(png, "image/png", "max-age=86400");
     }
+    // The service worker only shows pushed notifications; nothing secret.
+    if path == "/sw.js" {
+        return page_response(SW_JS, "text/javascript; charset=utf-8");
+    }
     if path == "/" || path == "/index.html" {
         if !authorized(state, headers) {
             return login_page(false);
@@ -717,6 +726,9 @@ async fn get(state: &Arc<AppState>, req: Request<Body>) -> Response<Body> {
             .map(|r| json!({"notifications": or_value(field(&r, "notifications"), json!([]))})),
         "/api/events" => return events(state),
         "/api/secrets" => Ok(json!({"requests": state.secrets.list()})),
+        "/api/push" => {
+            Ok(json!({"key": state.push.public_key(), "subscriptions": state.push.count()}))
+        }
         _ => return json_response(StatusCode::NOT_FOUND, &json!({"error": "not_found"}), None),
     };
     match result {
@@ -1099,6 +1111,24 @@ async fn dispatch_post(
                     .await?;
             }
             json!({"dismissed": ids.len()})
+        }
+        "/api/push/subscribe" => {
+            let sub = raw.get("subscription").cloned().unwrap_or(Value::Null);
+            state
+                .push
+                .subscribe(&sub)
+                .map_err(|e| CmuxError::new("bad_request", e))?;
+            json!({"ok": true, "subscriptions": state.push.count()})
+        }
+        "/api/push/unsubscribe" => {
+            json!({"removed": state.push.unsubscribe(&body.need("endpoint")?)})
+        }
+        "/api/push/test" => {
+            let sent = state
+                .push
+                .send_all(&json!({"title": "psycommux", "body": "Push notifications work.", "tag": "psycommux-test", "url": "/"}))
+                .await;
+            json!({"sent": sent.sent, "failed": sent.failed})
         }
         "/api/secrets/answer" => {
             let id = body.need("id")?;

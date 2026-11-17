@@ -6,5 +6,6 @@ pub mod cmux;
 pub mod events;
 pub mod net;
 pub mod panels;
+pub mod push;
 pub mod secrets;
 pub mod web;

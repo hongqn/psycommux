@@ -29,6 +29,8 @@ const state = {
   openNotes: new Set(),    // workspaces whose notification is shown up to the Mac's line limit
   secrets: [],             // open `psycommux secret` requests
   secretOpen: "",          // the one whose form is showing
+  pushOn: false,           // this device gets Web Push; the page shows no notifications itself
+  openAfterLoad: null,     // a tapped notification's URL, opened once the tree is in
   file: null,
   pendingNew: null,                     // {wsId, until}
   newCwd: null,                         // the folder input on the New screen
@@ -130,6 +132,7 @@ async function loadTree() {
     return;
   }
   if (state.secrets.length && !state.secretOpen) renderSecrets();  // workspace names arrived
+  if (state.openAfterLoad) { const url = state.openAfterLoad; state.openAfterLoad = null; openFromUrl(url); }
   if (state.pendingNew) {
     const ws = findWorkspace(state.pendingNew.wsId);
     const agent = ws && wsItems(ws).find(isAgent);
@@ -1425,16 +1428,98 @@ $("clearAll").onclick = async () => {
   scheduleTree();
 };
 function showBrowserNotification(n) {
+  if (state.pushOn) return;  // the service worker shows it, pushed by the server
   if (!n || !("Notification" in window) || Notification.permission !== "granted") return;
   if (document.visibilityState === "visible" && document.hasFocus()) return;
-  const notice = new Notification(n.title || "psycommux", { body: [n.subtitle, n.body].filter(Boolean).join("\n"), tag: n.id });
-  notice.onclick = () => { window.focus(); jumpTo(n); };
+  const title = n.title || "psycommux";
+  const body = [n.subtitle, n.body].filter(Boolean).join("\n");
+  try {
+    const notice = new Notification(title, { body, tag: n.id });
+    notice.onclick = () => { window.focus(); jumpTo(n); };
+  } catch (e) {
+    // Android's Chrome shows notifications only through a service worker.
+    const params = new URLSearchParams();
+    if (n.workspace_id) params.set("ws", n.workspace_id);
+    if (n.surface_id) params.set("s", n.surface_id);
+    const url = "/" + (params.toString() ? "?" + params : "");
+    navigator.serviceWorker?.getRegistration()
+      .then((reg) => reg && reg.showNotification(title, { body, tag: n.id, icon: "/icon-192.png", data: { url } }))
+      .catch(() => {});
+  }
 }
-$("enableNotify").onclick = async () => {
-  if (!("Notification" in window)) { alert("This browser has no Notification API (on iOS, add the page to the Home Screen first)."); return; }
-  const p = await Notification.requestPermission();
-  if (p !== "granted") alert("Browser notifications need HTTPS (or localhost) and permission.");
+// Web Push: the server pushes cmux notifications (while the Mac is unattended)
+// to this device's service worker, which shows them even with the app closed.
+// On iPhone this needs the page added to the Home Screen (iOS 16.4+).
+const canPush = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+function b64urlBytes(text) {
+  const raw = atob(text.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - text.length % 4) % 4));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+function sameKey(buffer, bytes) {
+  if (!buffer) return false;
+  const a = new Uint8Array(buffer);
+  return a.length === bytes.length && a.every((v, i) => v === bytes[i]);
+}
+function showPushState(text) {
+  $("pushState").textContent = "Notifications on this device: " + text;
+  $("enableNotify").textContent = state.pushOn ? "Turn off" : "Enable";
+  $("testPush").hidden = !state.pushOn;
+}
+// Subscribe (when `ask`, from a tap: it may prompt), or resend an existing
+// subscription so the server has it.
+async function syncPush(ask) {
+  if (!canPush) {
+    state.pushOn = false;
+    showPushState(/iPhone|iPad/.test(navigator.userAgent) ? "add psycommux to the Home Screen first" : "not supported here");
+    return;
+  }
+  if (Notification.permission === "denied") { state.pushOn = false; showPushState("blocked in settings"); return; }
+  if (!ask && Notification.permission !== "granted") { state.pushOn = false; showPushState("off"); return; }
+  try {
+    if (ask && (await Notification.requestPermission()) !== "granted") { showPushState("not allowed"); return; }
+    const reg = await navigator.serviceWorker.register("/sw.js");
+    await navigator.serviceWorker.ready;
+    const key = b64urlBytes((await api("/api/push")).key);
+    let sub = await reg.pushManager.getSubscription();
+    if (sub && !sameKey(sub.options.applicationServerKey, key)) { await sub.unsubscribe(); sub = null; }
+    if (!sub && ask) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+    if (!sub) { state.pushOn = false; showPushState("off"); return; }
+    await api("/api/push/subscribe", { subscription: sub.toJSON() });
+    state.pushOn = true;
+    showPushState("on");
+  } catch (e) {
+    state.pushOn = false;
+    showPushState("failed (" + e.message + ")");
+  }
+}
+async function pushOff() {
+  try {
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = reg && await reg.pushManager.getSubscription();
+    if (sub) { await api("/api/push/unsubscribe", { endpoint: sub.endpoint }).catch(() => {}); await sub.unsubscribe(); }
+  } catch (e) {}
+  state.pushOn = false;
+  showPushState("off");
+}
+$("enableNotify").onclick = () => (state.pushOn ? pushOff() : syncPush(true));
+$("testPush").onclick = async () => {
+  try {
+    const r = await api("/api/push/test", {});
+    showPushState(r.sent ? "on, test sent" : "on, but the test failed: " + (r.failed[0] || "no subscription"));
+  } catch (e) { showPushState("test failed (" + e.message + ")"); }
 };
+// A tapped notification opens /?ws=<workspace>&s=<surface>, or messages an open window.
+function openFromUrl(url) {
+  const params = new URL(url, location.href).searchParams;
+  const ws = params.get("ws"), s = params.get("s");
+  if (!ws && !s) return;
+  if (!state.tree) { state.openAfterLoad = url; return; }
+  jumpTo({ workspace_id: ws, surface_id: s });
+  document.body.classList.remove("show-notifs");
+}
+if (canPush) {
+  navigator.serviceWorker.addEventListener("message", (e) => { if (e.data && e.data.type === "open") openFromUrl(e.data.url); });
+}
 
 // ---- secrets for agents ------------------------------------------------------------------
 // `psycommux secret "<label>"` waits for a value from here. The value goes from
@@ -2017,6 +2102,8 @@ new ResizeObserver(() => {
 
 
 // ---- start ----------------------------------------------------------------------------------------
+if (location.search) { state.openAfterLoad = location.href; history.replaceState(null, "", "/"); }
 loadTree();
 loadNotifications();
 connectEvents();
+syncPush(false);
