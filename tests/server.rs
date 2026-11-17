@@ -481,6 +481,48 @@ async fn parse_sidebar_state_like_the_cmux_sidebar() {
     );
 }
 
+#[test]
+fn sidebar_state_keeps_markdown_blocks_and_the_pull_request() {
+    let state = parse_sidebar_state(&[
+        "pr=#42 open https://github.com/o/r/pull/42",
+        "pr_label=Review",
+        "status_count=0",
+        "meta_block_count=2",
+        "  notes=one\\ntwo",
+        "  plan=**first** priority=5",
+        "log_count=0",
+    ]);
+    assert_eq!(
+        state["pr"],
+        json!({"number": 42, "state": "open", "url": "https://github.com/o/r/pull/42", "label": "Review"})
+    );
+    assert_eq!(
+        state["blocks"],
+        json!([
+            {"key": "plan", "markdown": "**first**", "priority": 5},
+            {"key": "notes", "markdown": "one\ntwo", "priority": 0},
+        ])
+    );
+}
+
+#[test]
+fn sidebar_settings_come_from_cmux_defaults() {
+    let plist = r#"<dict>
+	<key>sidebarShowPullRequest</key>
+	<false/>
+	<key>sidebarShowPorts</key>
+	<true/>
+	<key>sidebarNotificationMessageLineLimit</key>
+	<integer>3</integer>
+	<key>sidebarTintHex</key>
+	<string>#000000</string>
+</dict>"#;
+    assert_eq!(
+        psycommux::web::parse_sidebar_settings(plist),
+        json!({"showPullRequests": false, "showPorts": true, "notificationMessageLineLimit": 3})
+    );
+}
+
 #[tokio::test]
 async fn v1_reply_reads_to_the_end_of_the_log() {
     let h = Harness::new().await;
@@ -1174,3 +1216,4 @@ async fn https_login_sets_a_secure_cookie_and_stalled_clients_do_not_block() {
         "{headers}"
     );
 }
+

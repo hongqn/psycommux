@@ -9,8 +9,14 @@ swarm of remote funnels: here, one phone steering many coding agents.
 
 - **Drawer**: cmux's workspaces, each expandable to what it holds: Claude
   Code sessions (✳), terminals (›_), browsers (◍), Markdown documents (¶) and
-  file previews (▤). A workspace shows a spinner while an agent works, "Needs
-  your input" when one waits on you, and its unread count.
+  file previews (▤). Each row shows what the Mac's sidebar shows, in its
+  order: description, latest notification, SSH target, status entries and
+  Markdown blocks, newest log line, progress, branch and directory, pull
+  request and ports, plus a spinner while an agent works, "Needs your input"
+  when one waits on you, and the unread count. It follows the Mac's Settings >
+  Sidebar choices, read from cmux's defaults (`com.cmuxterm.app`), except that
+  a notification shows at most 3 lines until tapped. Status icons, SF Symbols
+  on the Mac, are drawn with [Lucide](https://lucide.dev) icons.
 - **Claude Code sessions** open as a chat read from the session's transcript:
   your messages as bubbles, replies as Markdown, tool calls folded into steps
   with diffs and output, AskUserQuestion as tappable options, and permission
@@ -192,4 +198,4 @@ repository, written in Python.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE), which also carries the terms of the Lucide icons.

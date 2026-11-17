@@ -45,6 +45,31 @@ button.icon:hover { color: var(--fg); }
 .ws-head .name { font-size: 14px; font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-head .sub { font-size: 12px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-head .sub.attn { color: var(--warn); }
+.ws-head .name.wrap { white-space: normal; }
+.ws-head .name .pin { font-size: 10px; margin-right: 4px; vertical-align: 1px; }
+/* The details cmux's sidebar shows under a workspace title. */
+.ws-head .meta > :not(.name) { margin-top: 2px; }
+/* Rows grow with their details; the chevron, spinner and badge stay level with the title. */
+.ws-head { align-items: flex-start; }
+.ws-head .chev { line-height: 20px; }
+.ws-head > .spin, .ws-head > .badge { margin-top: 2px; }
+.d-desc, .d-note, .d-line, .d-progress, .d-block, .d-more { font-size: 12px; color: var(--mute); line-height: 1.4; }
+.d-desc { color: #c9c8c2; overflow-wrap: anywhere; }
+.d-desc a, .d-block a { color: var(--blue); }
+.d-note { white-space: pre-line; display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.d-line { display: flex; gap: 6px; align-items: baseline; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-decoration: none; }
+.d-line .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.d-line.mono { font: 11.5px ui-monospace, Menlo, monospace; display: block; }
+.d-ic { flex: none; min-width: 12px; align-self: center; display: inline-flex; justify-content: center; line-height: 1; }
+.d-ic svg { width: 12px; height: 12px; display: block; }
+.d-ic-text { font-size: 10px; font-weight: 600; }
+.d-dim { color: var(--dim); flex: none; }
+.d-pr { color: var(--mute); text-decoration: underline; text-underline-offset: 2px; }
+.d-block { font-size: 11.5px; max-height: 12.5em; overflow: hidden; }
+.d-block p { margin: .2em 0; }
+.d-progress .bar { height: 3px; border-radius: 2px; background: #3a3936; overflow: hidden; margin: 3px 0 1px; }
+.d-progress .fill { height: 100%; background: var(--acc); }
+.d-more { background: none; border: 0; padding: 0; font-weight: 600; font-size: 11px; color: var(--mute); cursor: pointer; }
 .ws.mac .ws-head .name::after { content: " ●"; color: var(--blue); font-size: 9px; vertical-align: 2px; }
 .ws-items { display: none; padding: 1px 0 6px 18px; }
 .ws.open .ws-items { display: block; }
@@ -259,3 +284,4 @@ body.show-notifs #notifs { display: flex; }
   .ws-head .name { font-size: 15px; }
 }
 .msg .rel { color: var(--blue); }
+

@@ -371,6 +371,7 @@ pub async fn build_tree(
                 "branch": field(&row, "branch_summary"),
                 "git_dirty": items(&row, "git_branches").any(|b| !is_falsy(&field(b, "dirty"))),
                 "pull_requests": or_value(field(&row, "pull_request_urls"), json!([])),
+                "remote": remote_line(&row),
                 "ports": or_value(field(&row, "listening_ports"), json!([])),
                 "sidebar": sidebar.and_then(|s| s.get(&ws_id)),
                 "layout": field(ws, "layout"),
@@ -384,7 +385,88 @@ pub async fn build_tree(
     if let Some(sidebar) = sidebar {
         sidebar.ensure(&all_ids);
     }
-    Ok(json!({"windows": out}))
+    Ok(json!({"windows": out, "sidebar_settings": sidebar_settings().await}))
+}
+
+/// The SSH line of a remote workspace's row: where it connects, and how it is doing.
+fn remote_line(row: &Value) -> Value {
+    let remote = field(row, "remote");
+    let target = field(row, "remote_display_target");
+    if is_falsy(&field(&remote, "enabled")) || target.as_str().is_none_or(str::is_empty) {
+        return Value::Null;
+    }
+    json!({"target": target, "state": field(row, "remote_connection_state")})
+}
+
+/// Which details the Mac's sidebar shows, from cmux's settings (Settings >
+/// Sidebar, or the `sidebar` block of cmux.json, which cmux keeps in its
+/// defaults). Read at most every 30 seconds.
+const SIDEBAR_SETTINGS: [(&str, &str); 15] = [
+    ("hideAllDetails", "sidebarHideAllDetails"),
+    (
+        "showWorkspaceDescription",
+        "sidebarShowWorkspaceDescription",
+    ),
+    ("showNotificationMessage", "sidebarShowNotificationMessage"),
+    (
+        "notificationMessageLineLimit",
+        "sidebarNotificationMessageLineLimit",
+    ),
+    ("showBranchDirectory", "sidebarShowBranchDirectory"),
+    ("stackBranchDirectory", "sidebarBranchDirectoryStacked"),
+    ("pathLastSegmentOnly", "sidebarPathLastSegmentOnly"),
+    ("showPullRequests", "sidebarShowPullRequest"),
+    ("showSSH", "sidebarShowSSH"),
+    ("showPorts", "sidebarShowPorts"),
+    ("showLog", "sidebarShowLog"),
+    ("showProgress", "sidebarShowProgress"),
+    ("showAgentActivity", "sidebarShowAgentActivity"),
+    ("showCustomMetadata", "sidebarShowStatusPills"),
+    ("wrapWorkspaceTitles", "sidebarWrapWorkspaceTitles"),
+];
+
+async fn sidebar_settings() -> Value {
+    static CACHE: Mutex<Option<(std::time::Instant, Value)>> = Mutex::new(None);
+    if let Some((at, value)) = CACHE.lock().unwrap().as_ref()
+        && at.elapsed() < Duration::from_secs(30)
+    {
+        return value.clone();
+    }
+    let plist = tokio::process::Command::new("defaults")
+        .args(["export", "com.cmuxterm.app", "-"])
+        .output()
+        .await
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let value = parse_sidebar_settings(&plist);
+    *CACHE.lock().unwrap() = Some((std::time::Instant::now(), value.clone()));
+    value
+}
+
+/// Settings the plist sets, under their cmux.json names; unset ones are left
+/// out, and the page uses cmux's defaults for them.
+pub fn parse_sidebar_settings(plist: &str) -> Value {
+    let mut out = Map::new();
+    for (name, key) in SIDEBAR_SETTINGS {
+        let re = regex::Regex::new(&format!(
+            r"<key>{key}</key>\s*<(true|false|integer|real)\s*/?>(?:([^<]*)</(?:integer|real)>)?"
+        ))
+        .unwrap();
+        let Some(caps) = re.captures(plist) else {
+            continue;
+        };
+        let value = match &caps[1] {
+            "true" => json!(true),
+            "false" => json!(false),
+            _ => caps
+                .get(2)
+                .and_then(|n| n.as_str().trim().parse::<f64>().ok())
+                .map(|n| json!(n as i64))
+                .unwrap_or(Value::Null),
+        };
+        out.insert(name.into(), value);
+    }
+    Value::Object(out)
 }
 
 // ---------------------------------------------------------------------------

@@ -19,12 +19,18 @@ const SIDEBAR_FETCH_WORKERS: usize = 8;
 
 /// Parse the v1 `sidebar_state` listing into what a sidebar row shows.
 ///
-/// Status pills keep cmux's order, highest priority first. Only the newest
-/// log entry is kept, as the sidebar row shows only that one.
+/// Status pills keep cmux's order, highest priority first, and so do the
+/// Markdown metadata blocks. Only the newest log entry is kept, as the sidebar
+/// row shows only that one.
 pub fn parse_sidebar_state<S: AsRef<str>>(lines: &[S]) -> Value {
     let attr_re = Regex::new(r" (icon|color|url|priority|format|work)=(\S+)$").unwrap();
     let log_re = Regex::new(r"^\[(\w+)\] (.*)$").unwrap();
+    let block_priority_re = Regex::new(r" priority=(-?\d+)$").unwrap();
+    let pr_re = Regex::new(r"^#(\d+) (\S+) (\S+)$").unwrap();
     let mut statuses: Vec<(i64, Value)> = Vec::new();
+    let mut blocks: Vec<(i64, Value)> = Vec::new();
+    let mut pr = Value::Null;
+    let mut pr_label = Value::Null;
     let mut log = Value::Null;
     let mut progress = Value::Null;
     let mut git_dirty = false;
@@ -62,6 +68,19 @@ pub fn parse_sidebar_state<S: AsRef<str>>(lines: &[S]) -> Value {
                         "work": attr("work"),
                     }),
                 ));
+            } else if section == "meta" {
+                let mut item = item.to_string();
+                let mut priority = 0;
+                if let Some(caps) = block_priority_re.captures(&item) {
+                    priority = caps[1].parse().unwrap_or(0);
+                    let start = caps.get(0).unwrap().start();
+                    item.truncate(start);
+                }
+                let (key, markdown) = item.split_once('=').unwrap_or((item.as_str(), ""));
+                blocks.push((
+                    priority,
+                    json!({"key": key, "markdown": markdown.replace("\\n", "\n"), "priority": priority}),
+                ));
             } else if section == "log" {
                 if let Some(caps) = log_re.captures(item) {
                     log = json!({"level": &caps[1], "message": &caps[2]});
@@ -73,8 +92,16 @@ pub fn parse_sidebar_state<S: AsRef<str>>(lines: &[S]) -> Value {
         section = match key {
             "status_count" => "status",
             "log_count" => "log",
+            "meta_block_count" => "meta",
             _ => "",
         };
+        if key == "pr" {
+            if let Some(caps) = pr_re.captures(value) {
+                pr = json!({"number": caps[1].parse::<i64>().unwrap_or(0), "state": &caps[2], "url": &caps[3]});
+            }
+        } else if key == "pr_label" && value != "none" {
+            pr_label = json!(value);
+        }
         if key == "git_branch" {
             git_dirty = value.ends_with(" dirty");
         } else if key == "progress" && value != "none" {
@@ -88,6 +115,10 @@ pub fn parse_sidebar_state<S: AsRef<str>>(lines: &[S]) -> Value {
         }
     }
     statuses.sort_by_key(|(priority, _)| -priority); // stable: ties keep cmux's order
+    blocks.sort_by_key(|(priority, _)| -priority);
+    if let Some(pr) = pr.as_object_mut() {
+        pr.insert("label".into(), pr_label);
+    }
     let working = statuses.iter().any(|(_, s)| {
         s.get("work")
             .and_then(Value::as_str)
@@ -95,6 +126,8 @@ pub fn parse_sidebar_state<S: AsRef<str>>(lines: &[S]) -> Value {
     });
     json!({
         "statuses": statuses.into_iter().map(|(_, s)| s).collect::<Vec<_>>(),
+        "blocks": blocks.into_iter().map(|(_, b)| b).collect::<Vec<_>>(),
+        "pr": pr,
         "log": log,
         "progress": progress,
         "working": working,
