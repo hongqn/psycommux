@@ -44,6 +44,11 @@ swarm of remote funnels: here, one phone steering many coding agents.
   the browser has no speech recognition, and on iPhone and iPad, where WebKit
   hears only the first dictation after the page loads (WebKit bugs 317741 and
   321436); use the keyboard's own dictation key there.
+- **Secrets for agents**: when an agent needs a password or token it cannot
+  get itself (1Password asking for Touch ID on the Mac while you are away), it
+  runs `psycommux secret`; the phone shows the request, and the value you
+  paste or autofill there goes straight to the waiting command. See
+  [Secrets](#secrets).
 - **Notifications** in a list laid out like cmux's, with browser
   notifications; opening an item marks its notifications read.
 
@@ -117,6 +122,28 @@ Tailscale certificates come from Let's Encrypt, so the Mac's tailnet name
 appears in public Certificate Transparency logs, and they expire after 90
 days: rerun `tailscale cert`, then restart psycommux.
 
+## Secrets
+
+An agent (or any program of yours) asks for a value it does not have:
+
+```bash
+psycommux secret "Deploy key for staging" --out ~/.cache/staging-key   # file, mode 600
+psycommux secret "GitHub token for gh" --stdout | gh auth login --with-token
+```
+
+The request shows at the top of the page on the phone, as a cmux
+notification, and names the workspace that asked. Tap it, fill the field with
+1Password's autofill (Face ID on the phone) or paste, and Send; or Decline.
+The command waits up to `--timeout` seconds (600 by default) and exits nonzero
+when declined or unanswered, so an agent should run it with a long enough
+timeout or in the background.
+
+The command reaches the server through `~/.psycommux/secret-<port>.sock`,
+which only your user can open. The value travels from the phone to that
+command and nowhere else: psycommux keeps no copy, and neither the page nor
+the server logs it. `--stdout` refuses to print to a terminal. Ask for one
+value per request, and remove `--out` files when they are no longer needed.
+
 ## How it works
 
 ```
@@ -137,6 +164,7 @@ phone ──HTTP/SSE──▶ psycommux ──unix socket──▶ cmux.app
 | `POST /api/session/new {cwd, prompt?}` | `workspace.create` with `initial_input: "claude '<prompt>'\n"` |
 | `POST /api/workspace/{select,create}` | `workspace.select`, `workspace.create` |
 | `GET /api/notifications`, `POST /api/notifications/{read,dismiss,clear_all}` | `notification.*` |
+| `GET /api/secrets`, `POST /api/secrets/{answer,decline} {id, value?}` | Open `psycommux secret` requests; the answer goes back over the local socket, with `notification.create` / `notification.dismiss` around it |
 | `GET /api/events` (SSE) | `events.stream`, with notification bodies looked up (the stream redacts them) |
 
 API calls also accept `Authorization: Bearer <token>`:
@@ -180,6 +208,10 @@ curl -H "Authorization: Bearer $PSYCOMMUX_TOKEN" http://127.0.0.1:8787/api/tree
   origin. Its images load straight from their https URLs (the page's CSP
   allows `img-src https:` for that), without a referrer; images that need the
   Mac's login show their alt text instead.
+- A secret sent from the phone reaches only the `psycommux secret` command
+  waiting for it, over a socket in a directory only your user can open.
+  Whoever has the token can answer a request, and any program of yours can
+  make one, so read the label and workspace before you send.
 - `/api/send` skips the "don't type over an agent's prompt draft" check that
   `cmux send` does. Check the screen before you send.
 

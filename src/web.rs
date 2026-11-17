@@ -18,6 +18,7 @@ use crate::cmux::{revisions_from, screen_text, value_text, CmuxClient, CmuxError
 use crate::events::{EventHub, SidebarCache};
 use crate::net::{constant_time_eq, icon_png, netloc, shell_quote};
 use crate::panels::{self, SessionFiles};
+use crate::secrets::{SecretRequests, MAX_SECRET_BYTES};
 
 pub const COOKIE_NAME: &str = "psycommux_token";
 const MAX_BODY_BYTES: usize = 256 * 1024;
@@ -479,6 +480,8 @@ pub struct AppState {
     pub agents: AgentSessions,
     pub files: SessionFiles,
     pub viewports: Arc<BrowserViewports>,
+    /// Secrets `psycommux secret` waits for, answered from the phone.
+    pub secrets: Arc<SecretRequests>,
     pub token: String,
     pub allowed_origins: Vec<String>,
     pub access_log: bool,
@@ -492,6 +495,7 @@ impl AppState {
             agents: AgentSessions::new(Arc::clone(&client), Duration::from_secs(1)),
             files: SessionFiles::new(panels::default_session_glob()),
             viewports: BrowserViewports::new(Arc::clone(&client)),
+            secrets: SecretRequests::new(Arc::clone(&client), Arc::clone(&hub)),
             client,
             hub,
             token: token.into(),
@@ -712,6 +716,7 @@ async fn get(state: &Arc<AppState>, req: Request<Body>) -> Response<Body> {
             .await
             .map(|r| json!({"notifications": or_value(field(&r, "notifications"), json!([]))})),
         "/api/events" => return events(state),
+        "/api/secrets" => Ok(json!({"requests": state.secrets.list()})),
         _ => return json_response(StatusCode::NOT_FOUND, &json!({"error": "not_found"}), None),
     };
     match result {
@@ -1094,6 +1099,29 @@ async fn dispatch_post(
                     .await?;
             }
             json!({"dismissed": ids.len()})
+        }
+        "/api/secrets/answer" => {
+            let id = body.need("id")?;
+            let value = match raw.get("value") {
+                Some(Value::String(v)) if !v.is_empty() => v.clone(),
+                _ => return Err(CmuxError::new("bad_request", "missing value")),
+            };
+            if value.len() > MAX_SECRET_BYTES {
+                return Err(CmuxError::new("too_large", "secret too large"));
+            }
+            if !state.secrets.answer(&id, Some(value)) {
+                return Err(CmuxError::new(
+                    "not_found",
+                    "no such request; it may have timed out",
+                ));
+            }
+            ok()
+        }
+        "/api/secrets/decline" => {
+            if !state.secrets.answer(&body.need("id")?, None) {
+                return Err(CmuxError::new("not_found", "no such request"));
+            }
+            ok()
         }
         "/api/notifications/dismiss" => ok_or(
             client

@@ -27,6 +27,8 @@ const state = {
   browser: null,
   moreDetails: new Set(),  // workspaces whose status entries are all shown
   openNotes: new Set(),    // workspaces whose notification is shown up to the Mac's line limit
+  secrets: [],             // open `psycommux secret` requests
+  secretOpen: "",          // the one whose form is showing
   file: null,
   pendingNew: null,                     // {wsId, until}
   newCwd: null,                         // the folder input on the New screen
@@ -127,6 +129,7 @@ async function loadTree() {
     $("wslist").replaceChildren(el("div", { className: "empty", textContent: "Error: " + e.message }));
     return;
   }
+  if (state.secrets.length && !state.secretOpen) renderSecrets();  // workspace names arrived
   if (state.pendingNew) {
     const ws = findWorkspace(state.pendingNew.wsId);
     const agent = ws && wsItems(ws).find(isAgent);
@@ -1433,6 +1436,74 @@ $("enableNotify").onclick = async () => {
   if (p !== "granted") alert("Browser notifications need HTTPS (or localhost) and permission.");
 };
 
+// ---- secrets for agents ------------------------------------------------------------------
+// `psycommux secret "<label>"` waits for a value from here. The value goes from
+// the form straight to the waiting command; the page keeps no copy.
+function workspaceTitle(id) {
+  const ws = id && findWorkspace(id);
+  return ws ? ws.title || "" : "";
+}
+function renderSecrets() {
+  const box = $("secrets");
+  box.replaceChildren();
+  if (state.secretOpen && !state.secrets.some((r) => r.id === state.secretOpen)) state.secretOpen = "";
+  for (const req of state.secrets) {
+    const where = workspaceTitle(req.workspace_id);
+    box.append(el("button", { className: "secret-req", onclick: () => { state.secretOpen = req.id; renderSecrets(); } },
+      el("span", { className: "secret-key", textContent: "🔑" }),
+      el("span", { className: "grow" },
+        el("b", { textContent: req.label }),
+        el("span", { className: "secret-where", textContent: where ? " · " + where : "" })),
+      el("span", { className: "secret-go", textContent: "Provide" })));
+  }
+  const req = state.secrets.find((r) => r.id === state.secretOpen);
+  if (req) box.append(secretSheet(req));
+}
+function secretSheet(req) {
+  const close = () => { state.secretOpen = ""; renderSecrets(); };
+  const input = el("input", { type: "password", name: "password", autocomplete: "current-password",
+    autocapitalize: "off", spellcheck: false, placeholder: "Paste or autofill", required: true });
+  input.setAttribute("autocorrect", "off");
+  const note = el("div", { className: "secret-note" });
+  const show = el("button", { type: "button", className: "ghost", textContent: "Show",
+    onclick: () => { const hidden = input.type === "password"; input.type = hidden ? "text" : "password"; show.textContent = hidden ? "Hide" : "Show"; } });
+  const send = el("button", { type: "submit", className: "primary", textContent: "Send" });
+  const form = el("form", { className: "secret-form", onsubmit: async (e) => {
+    e.preventDefault();
+    if (!input.value) return;
+    send.disabled = true;
+    const value = input.value;
+    input.value = "";
+    try { await api("/api/secrets/answer", { id: req.id, value }); close(); }
+    catch (err) { note.textContent = err.message; send.disabled = false; }
+  } },
+    el("div", { className: "secret-title", textContent: "Secret requested" }),
+    el("div", { className: "secret-label", textContent: req.label }),
+    workspaceTitle(req.workspace_id) ? el("div", { className: "secret-where", textContent: "from " + workspaceTitle(req.workspace_id) }) : null,
+    el("input", { type: "text", name: "username", autocomplete: "username", className: "secret-user", tabIndex: -1, value: req.label }),
+    el("div", { className: "secret-row" }, input, show),
+    note,
+    el("div", { className: "secret-actions" },
+      el("button", { type: "button", className: "ghost danger", textContent: "Decline", onclick: async () => {
+        try { await api("/api/secrets/decline", { id: req.id }); } catch (err) {}
+        close();
+      } }),
+      el("button", { type: "button", className: "ghost", textContent: "Later", onclick: close }),
+      send));
+  const sheet = el("div", { className: "secret-sheet", onclick: (e) => { if (e.target === sheet) close(); } }, form);
+  setTimeout(() => input.focus(), 50);
+  return sheet;
+}
+function setSecrets(list) {
+  // The browser notification comes with the cmux notification the server posts.
+  state.secrets = list || [];
+  if (state.secretOpen && state.secrets.some((r) => r.id === state.secretOpen)) return;  // keep the open form (and what is typed)
+  renderSecrets();
+}
+async function loadSecrets() {
+  try { setSecrets((await api("/api/secrets")).requests); } catch (e) {}
+}
+
 // ---- live events -------------------------------------------------------------------------------
 function connectEvents() {
   const es = new EventSource("/api/events");
@@ -1441,9 +1512,10 @@ function connectEvents() {
     if (m.type === "status") {
       $("status").className = m.connected ? "ok" : "bad";
       $("status").title = m.connected ? "connected to cmux" : "cmux offline";
-      if (m.connected) { loadTree(); loadNotifications(); }
+      if (m.connected) { loadTree(); loadNotifications(); loadSecrets(); }
       return;
     }
+    if (m.type === "secrets") { setSecrets(m.requests); return; }
     if (m.type === "sidebar") {
       const ws = findWorkspace(m.workspace_id);
       if (ws) { ws.sidebar = m.sidebar; renderNav(); }

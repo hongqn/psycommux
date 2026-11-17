@@ -12,8 +12,10 @@ use psycommux::web::{router, AppState};
 
 /// Drive cmux workspaces from a phone or another browser.
 #[derive(Parser)]
-#[command(version)]
+#[command(version, args_conflicts_with_subcommands = true)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
     /// Bind address (expose remotely through Tailscale, a TLS proxy, or --tls-cert)
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -44,15 +46,97 @@ struct Args {
     access_log: bool,
 }
 
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Ask your phone for a secret (a password, a token), for an agent that
+    /// cannot get it itself: the running psycommux shows the request, and the
+    /// value you fill in on the phone is written to --out or to stdout.
+    Secret {
+        /// What is needed, shown on the phone, e.g. "GitHub token for gh"
+        label: String,
+        /// Write the secret to this file, readable only by you
+        #[arg(long, required_unless_present = "stdout", conflicts_with = "stdout")]
+        out: Option<PathBuf>,
+        /// Print the secret to stdout, to pipe it into the program that needs it
+        #[arg(long)]
+        stdout: bool,
+        /// Seconds to wait for an answer
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+        /// Port of the psycommux server to ask
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+    },
+}
+
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    match run(Args::parse()).await {
+    let mut args = Args::parse();
+    let outcome = match args.command.take() {
+        Some(Command::Secret {
+            label,
+            out,
+            stdout,
+            timeout,
+            port,
+        }) => secret(&label, out, stdout, timeout, port).await,
+        None => run(args).await,
+    };
+    match outcome {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("error: {message}");
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+async fn secret(
+    label: &str,
+    out: Option<PathBuf>,
+    stdout: bool,
+    timeout: u64,
+    port: u16,
+) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if stdout && std::io::stdout().is_terminal() {
+        return Err(
+            "stdout is a terminal, where the secret would show; pipe it, or use --out".into(),
+        );
+    }
+    let env = |key: &str| std::env::var(key).unwrap_or_default();
+    eprintln!("waiting for the secret from your phone ({label})...");
+    let value = psycommux::secrets::request(
+        &psycommux::secrets::socket_path(port),
+        label,
+        &env("CMUX_WORKSPACE_ID"),
+        &env("CMUX_SURFACE_ID"),
+        std::time::Duration::from_secs(timeout),
+    )
+    .await?;
+    match out {
+        Some(path) => {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .and_then(|()| file.write_all(value.as_bytes()))
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            eprintln!("wrote the secret to {}", path.display());
+        }
+        None => {
+            let mut out = std::io::stdout();
+            out.write_all(value.as_bytes())
+                .and_then(|()| out.flush())
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 async fn run(args: Args) -> Result<(), String> {
@@ -112,6 +196,10 @@ async fn run(args: Args) -> Result<(), String> {
     state.allowed_origins = origins;
     state.access_log = args.access_log;
     state.tls = tls.is_some();
+    let secret_socket = psycommux::secrets::socket_path(args.port);
+    if let Err(e) = state.secrets.listen(&secret_socket) {
+        eprintln!("warning: `psycommux secret` will not work: {e}");
+    }
     let app = router(Arc::new(state));
 
     let bind_host = if args.host.contains(':') {

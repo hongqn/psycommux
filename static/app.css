@@ -285,3 +285,26 @@ body.show-notifs #notifs { display: flex; }
 }
 .msg .rel { color: var(--blue); }
 
+/* ---- secrets requested by agents (psycommux secret) ---- */
+#secrets { position: fixed; z-index: 60; left: 0; right: 0; top: 0; padding-top: env(safe-area-inset-top); display: flex; flex-direction: column; gap: 6px; pointer-events: none; }
+#secrets > * { pointer-events: auto; }
+.secret-req { margin: 6px 10px 0; display: flex; align-items: center; gap: 10px; text-align: left; background: #3b3226; border: 1px solid #6b5636;
+  border-radius: 12px; padding: 10px 12px; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
+.secret-req .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.secret-req b { font-weight: 600; }
+.secret-where { color: var(--mute); font-size: 13px; }
+.secret-go { color: var(--warn); font-weight: 600; flex: none; }
+.secret-sheet { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: flex-start; justify-content: center;
+  padding: calc(env(safe-area-inset-top) + 48px) 12px 12px; }
+.secret-form { width: 100%; max-width: 420px; background: var(--panel); border: 1px solid #4a4945; border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.secret-title { font-size: 13px; color: var(--warn); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.secret-label { font-size: 17px; font-weight: 600; overflow-wrap: anywhere; }
+.secret-user { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.secret-row { display: flex; gap: 6px; }
+.secret-row input { flex: 1; min-width: 0; font: 16px ui-monospace, Menlo, monospace; color: var(--fg); background: var(--bg); border: 1px solid #4a4945; border-radius: 9px; padding: 9px 10px; }
+.secret-note { color: var(--err); font-size: 13px; min-height: 0; }
+.secret-note:empty { display: none; }
+.secret-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.secret-actions .danger { color: var(--err); margin-right: auto; }
+.secret-actions .primary { background: var(--acc); border-color: var(--acc); color: #fff; font-weight: 600; }
+.secret-actions .primary:disabled { opacity: .5; }

@@ -1217,3 +1217,127 @@ async fn https_login_sets_a_secure_cookie_and_stalled_clients_do_not_block() {
     );
 }
 
+// -- secrets handed to agents ---------------------------------------------------
+
+async fn open_secrets(h: &Harness, count: usize) -> Value {
+    for _ in 0..200 {
+        let list = h
+            .request("GET", "/api/secrets", None, &[], true)
+            .await
+            .json();
+        if list["requests"].as_array().map_or(0, Vec::len) == count {
+            return list["requests"].clone();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("never saw {count} open secret requests");
+}
+
+fn ask_secret(
+    path: &std::path::Path,
+    timeout: Duration,
+) -> tokio::task::JoinHandle<Result<String, String>> {
+    let path = path.to_path_buf();
+    tokio::spawn(async move {
+        psycommux::secrets::request(&path, "GitHub token for gh", WS_ID, SURF_ID, timeout).await
+    })
+}
+
+#[tokio::test]
+async fn secret_goes_from_the_phone_to_the_waiting_command() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = Harness::new().await;
+    let path = h.tmp.path().join("private").join("secret.sock");
+    h.state.secrets.listen(&path).unwrap();
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(path.parent().unwrap()), 0o700);
+
+    let ask = ask_secret(&path, Duration::from_secs(5));
+    let requests = open_secrets(&h, 1).await;
+    let req = &requests[0];
+    assert_eq!(req["label"], "GitHub token for gh");
+    assert_eq!(req["workspace_id"], WS_ID);
+    assert_eq!(req["surface_id"], SURF_ID);
+    let id = req["id"].as_str().unwrap().to_string();
+    let posted = h.fake.last("notification.create");
+    assert_eq!(posted["subtitle"], "GitHub token for gh");
+    assert_eq!(posted["workspace_id"], WS_ID);
+
+    h.fake.set(|st| {
+        st.notifications = vec![json!({"id": "n-secret", "title": "Secret requested",
+            "subtitle": "GitHub token for gh", "body": posted["body"].clone()})]
+    });
+
+    let answer = json!({"id": id, "value": "s3cret value"});
+    let resp = h
+        .request(
+            "POST",
+            "/api/secrets/answer",
+            Some(answer.clone()),
+            &[],
+            true,
+        )
+        .await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(ask.await.unwrap().unwrap(), "s3cret value");
+    open_secrets(&h, 0).await;
+    for _ in 0..100 {
+        if !h.fake.calls_of("notification.dismiss").is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(h.fake.last("notification.dismiss")["id"], "n-secret");
+    let again = h
+        .request("POST", "/api/secrets/answer", Some(answer), &[], true)
+        .await;
+    assert_eq!(again.status, 404);
+}
+
+#[tokio::test]
+async fn secret_requests_can_be_declined_and_abandoned() {
+    let h = Harness::new().await;
+    let path = h.tmp.path().join("secret.sock");
+    h.state.secrets.listen(&path).unwrap();
+
+    let ask = ask_secret(&path, Duration::from_secs(5));
+    let id = open_secrets(&h, 1).await[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = h
+        .request(
+            "POST",
+            "/api/secrets/decline",
+            Some(json!({"id": id})),
+            &[],
+            true,
+        )
+        .await;
+    assert_eq!(resp.status, 200);
+    assert!(ask.await.unwrap().unwrap_err().contains("declined"));
+
+    // A command that stops waiting takes its request off the phone.
+    let ask = ask_secret(&path, Duration::from_millis(300));
+    open_secrets(&h, 1).await;
+    assert!(ask.await.unwrap().unwrap_err().contains("no answer"));
+    open_secrets(&h, 0).await;
+
+    let empty = h
+        .request(
+            "POST",
+            "/api/secrets/answer",
+            Some(json!({"id": "x", "value": ""})),
+            &[],
+            true,
+        )
+        .await;
+    assert_eq!(empty.status, 400);
+    assert_eq!(
+        h.request("GET", "/api/secrets", None, &[], false)
+            .await
+            .status,
+        401
+    );
+}
