@@ -1992,7 +1992,23 @@ function restoreScroll(pre) {
   requestAnimationFrame(() => { pre.restoring = false; });
 }
 
+// Repainting replaces the text, which drops any selection in it. Hold the
+// screen still while text is selected there, and catch up once it is let go.
+function selectingIn(pre) {
+  const s = document.getSelection();
+  return !!s && !s.isCollapsed && (pre.contains(s.anchorNode) || pre.contains(s.focusNode));
+}
+document.addEventListener("selectionchange", () => {
+  for (const pre of document.querySelectorAll("pre.term.held")) {
+    if (selectingIn(pre)) continue;
+    pre.classList.remove("held");
+    const screen = state.screens[pre.dataset.surface];
+    if (screen) paintScreen(pre, screen);
+  }
+});
+
 function paintScreen(pre, screen) {
+  if (selectingIn(pre)) { pre.classList.add("held"); return; }
   if (screen.grid) paintGrid(pre, screen.grid);
   else { pre.style.color = ""; pre.style.background = ""; pre.textContent = screen.text || (screen.error ? "[" + screen.error + "]" : ""); }
   restoreScroll(pre);

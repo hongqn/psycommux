@@ -441,3 +441,25 @@ fn a_cmux_notification_as_a_push_message() {
     assert_eq!(m["tag"], "n1");
     assert_eq!(m["url"], "/?ws=W1&s=S1");
 }
+
+#[test]
+fn faint_terminal_text_is_a_solid_color() {
+    // iOS will not select text drawn with opacity, so faint becomes a blend.
+    let grid = json!({
+        "terminal_foreground": "#FFFFFF", "terminal_background": "#1E1E1E",
+        "styles": [
+            {"id": 4, "faint": true},
+            {"id": 5, "faint": true, "foreground_source": "palette", "foreground": "#FF0000"},
+            {"id": 6, "faint": true, "foreground_source": "palette", "foreground": "red"},
+        ],
+        "scrollback_rows": 0, "rows": 0,
+    });
+    let styles = &psycommux::cmux::compact_grid(&grid)["styles"];
+    assert_eq!(styles["4"], "color:#A5A5A5");
+    assert_eq!(styles["5"], "color:#A50C0C");
+    assert_eq!(styles["6"], "color:red;opacity:.6");
+    assert_eq!(
+        psycommux::cmux::blend("#000000", "#FFFFFF", 0.5).as_deref(),
+        Some("#808080")
+    );
+}

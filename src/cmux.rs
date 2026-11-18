@@ -117,6 +117,25 @@ fn truthy(v: &Value, key: &str) -> bool {
     }
 }
 
+fn hex_rgb(color: &str) -> Option<[f64; 3]> {
+    let hex = color.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.is_ascii() {
+        return None;
+    }
+    let mut rgb = [0.0; 3];
+    for (i, c) in rgb.iter_mut().enumerate() {
+        *c = f64::from(u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?);
+    }
+    Some(rgb)
+}
+
+/// `amount` of `fg` over `bg`, as #RRGGBB; None unless both are #RRGGBB.
+pub fn blend(fg: &str, bg: &str, amount: f64) -> Option<String> {
+    let (f, b) = (hex_rgb(fg)?, hex_rgb(bg)?);
+    let c = |i: usize| (b[i] + (f[i] - b[i]) * amount).round() as u8;
+    Some(format!("#{:02X}{:02X}{:02X}", c(0), c(1), c(2)))
+}
+
 /// Shrink a cmux.render-grid.v1 frame (from terminal.replay) for the browser.
 ///
 /// Styles become CSS strings keyed by id; spans become `[column, cells, text,
@@ -152,7 +171,22 @@ pub fn compact_grid(grid: &Value) -> Value {
             bg = Some(b);
         }
         let mut css: Vec<String> = Vec::new();
-        if let Some(fg) = fg.filter(|s| !s.is_empty()) {
+        let fg = fg.filter(|s| !s.is_empty());
+        // Faint text gets a solid color 60% of the way from the background:
+        // iOS will not select text drawn with opacity.
+        let faint = truthy(st, "faint");
+        let faint_color = faint
+            .then(|| {
+                blend(
+                    fg.unwrap_or(term_fg),
+                    bg.filter(|s| !s.is_empty()).unwrap_or(term_bg),
+                    0.6,
+                )
+            })
+            .flatten();
+        if let Some(c) = &faint_color {
+            css.push(format!("color:{c}"));
+        } else if let Some(fg) = fg {
             css.push(format!("color:{fg}"));
         }
         if let Some(bg) = bg.filter(|s| !s.is_empty()) {
@@ -164,7 +198,7 @@ pub fn compact_grid(grid: &Value) -> Value {
         if truthy(st, "italic") {
             css.push("font-style:italic".into());
         }
-        if truthy(st, "faint") {
+        if faint && faint_color.is_none() {
             css.push("opacity:.6".into());
         }
         let deco: Vec<&str> = [
