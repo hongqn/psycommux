@@ -271,7 +271,7 @@ body.show-notifs #notifs { display: flex; }
 .n-empty { text-align: center; color: var(--mute); padding: 28px 16px; } .n-empty b { display: block; color: var(--fg); margin-bottom: 4px; }
 #notifs .foot { border-top: 1px solid #45443f; padding: 8px 16px; font-size: 12px; color: var(--mute); }
 #notifs .foot button { font-size: 12px; padding: .2em .6em; }
-#menuPop { position: fixed; z-index: 25; background: #2d2c2a; border: 1px solid #45443f; border-radius: 12px; padding: 6px; box-shadow: 0 14px 44px rgba(0,0,0,.5); display: flex; flex-direction: column; min-width: 180px; }
+#menuPop { position: fixed; z-index: 35; background: #2d2c2a; border: 1px solid #45443f; border-radius: 12px; padding: 6px; box-shadow: 0 14px 44px rgba(0,0,0,.5); display: flex; flex-direction: column; min-width: 180px; }
 #menuPop[hidden] { display: none; }
 #menuPop button { background: none; border: 0; text-align: left; padding: .5em .8em; border-radius: 8px; }
 #menuPop button:hover { background: #3a3936; }
@@ -314,3 +314,38 @@ body.show-notifs #notifs { display: flex; }
 .secret-actions .danger { color: var(--err); margin-right: auto; }
 .secret-actions .primary { background: var(--acc); border-color: var(--acc); color: #fff; font-weight: 600; }
 .secret-actions .primary:disabled { opacity: .5; }
+
+/* ---- workspace list: filter, row menu, phone summaries ---- */
+#wsfilter { display: flex; gap: 6px; margin: 0 12px 8px; }
+#wsfilter button { font-size: 12.5px; padding: .25em .8em; border-radius: 14px; background: none; border-color: #45443f; color: var(--mute); }
+#wsfilter button.on { background: var(--raised); color: var(--fg); border-color: #6a6964; }
+.ws-more { flex: none; background: none; border: 0; color: var(--dim); font-size: 16px; line-height: 1; padding: 2px 4px; min-width: 28px; min-height: 24px; border-radius: 6px; }
+.ws-more:hover { color: var(--fg); background: #34332f; }
+.d-sum { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; white-space: normal; overflow: hidden; }
+.d-line.d-sum { display: flex; }
+.d-line.d-sum .grow { white-space: nowrap; }
+#menuPop .sep { height: 1px; background: #45443f; margin: 4px 6px; }
+#menuPop button.danger { color: var(--err); }
+#menuPop { max-height: calc(var(--vvh, 100dvh) - 16px); overflow-y: auto; }
+
+/* ---- dialogs ---- */
+.ask-scrim { position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; padding: 16px; }
+.ask { width: min(360px, 100%); background: #2d2c2a; border: 1px solid #45443f; border-radius: 16px; padding: 18px 18px 14px; box-shadow: 0 20px 60px rgba(0,0,0,.55); }
+.ask-title { font-weight: 650; font-size: 16px; }
+.ask-msg { color: var(--mute); font-size: 14px; margin-top: 6px; overflow-wrap: anywhere; }
+.ask-input { width: 100%; margin-top: 12px; background: var(--panel); border: 1px solid #55544f; border-radius: 9px; color: var(--fg); font: 16px ui-sans-serif, -apple-system, system-ui; padding: .5em .7em; outline: none; }
+.ask-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.ask-buttons button { min-width: 84px; min-height: 38px; }
+.ask-ok { background: var(--acc); border-color: transparent; color: #fff; font-weight: 600; }
+.ask-ok.danger { background: var(--err); }
+
+/* ---- header bell: the count sits on the corner, the bell stays visible ---- */
+#bell .badge { top: 2px; right: 0; min-width: 16px; height: 16px; line-height: 16px; font-size: 10px; padding: 0 4px; border-radius: 8px; transform: translate(35%, -20%); }
+
+/* ---- send: dim until there is something to send ---- */
+.send.idle { background: #4a4945; color: #8a8984; }
+.chat-status .resume { margin-left: auto; background: var(--acc); border-color: transparent; color: #fff; font-weight: 600; font-size: 13px; padding: .35em .9em; border-radius: 16px; }
+.chat-status .resume:disabled { opacity: .6; }
+#composer .box.ended { opacity: .55; }
+/* Each wide character gets two cells: its 1em glyph plus the rest as letter spacing. */
+.term .w2 { display: inline-block; white-space: pre; overflow: visible; text-align: left; vertical-align: top; letter-spacing: calc(var(--cell, 0.6em) * 2 - 1em); }

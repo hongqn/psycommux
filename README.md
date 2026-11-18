@@ -16,7 +16,19 @@ swarm of remote funnels: here, one phone steering many coding agents.
   when one waits on you, and the unread count. It follows the Mac's Settings >
   Sidebar choices, read from cmux's defaults (`com.cmuxterm.app`), except that
   a notification shows at most 3 lines until tapped. Status icons, SF Symbols
-  on the Mac, are drawn with [Lucide](https://lucide.dev) icons.
+  on the Mac, are drawn with [Lucide](https://lucide.dev) icons. On a phone a
+  closed row is two lines, the name and what matters most (an agent waiting, a
+  colored status, the latest notification), and only the open workspace stays
+  unfolded; "Needs you" lists just the workspaces with unread notifications or
+  an agent waiting.
+- **Workspace and panel menus**: ⋯ on a workspace row renames, pins, marks
+  read or unread, opens a terminal or a Claude session there, evens out the
+  Mac's splits, or closes it; ⋯ in the header does the same for the open panel
+  (rename, new terminal or browser tab, split on the Mac, move to a new
+  workspace, close). Closing asks first, and asks again if a program is still
+  running there.
+- **Resume**: a Claude session that has ended offers "Resume session", which
+  runs `claude --resume <id>` in its terminal from the folder it ran in.
 - **Claude Code sessions** open as a chat read from the session's transcript:
   your messages as bubbles, replies as Markdown, tool calls folded into steps
   with diffs and output, AskUserQuestion as tappable options, and permission
@@ -181,11 +193,14 @@ phone ──HTTP/SSE──▶ psycommux ──unix socket──▶ cmux.app
 | `POST /api/screens {surfaces: {id: revision}}` | Waits until any listed terminal changes (`surface.wait_text_change`, or `surface.read_text` polled on older cmux), with colors from `terminal.replay` |
 | `POST /api/send`, `/api/key`, `/api/peek` | `surface.send_text`, `surface.send_key`, `surface.read_text` |
 | `POST /api/chat/{history,poll,send,interrupt} {session_id}` | The session's transcript, read backwards in pages and forward from a byte offset; `mobile.chat.send` / `mobile.chat.interrupt` |
+| `POST /api/chat/resume {session_id}` | `surface.send_text` of `cd <folder> && claude --resume <id>` into an ended session's terminal |
 | `POST /api/browser/{shot,act,release}` | `browser.screenshot` (answered as WebP bytes, or 204 when unchanged), `browser.viewport.set`, `browser.eval` (taps, scrolls, typing, reader view), `browser.press`, `browser.navigate` |
 | `POST /api/upload` (the file as the body, its name in `X-Filename`) | Saved as `~/.psycommux/uploads/<random>-<name>` (0600); answers `{path}` |
 | `POST /api/file {surface_id}` | The file a Markdown or file-preview panel shows |
 | `POST /api/session/new {cwd, prompt?}` | `workspace.create` with `initial_input: "claude '<prompt>'\n"` |
 | `POST /api/workspace/{select,create}` | `workspace.select`, `workspace.create` |
+| `POST /api/workspace/action {workspace_id, action, title?, force?}` | `rename` → `workspace.rename`; `pin`, `unpin`, `mark-read`, `mark-unread` → `workspace.action`; `equalize` → `workspace.equalize_splits`; `close` → `workspace.close` (409 `confirmation_required` while something runs, unless `force`) |
+| `POST /api/surface/action {surface_id, action, title?, url?, force?}` | `rename`, `new-terminal-right`, `new-browser-right`, `move-to-new-workspace` → `tab.action`; `split-right`, `split-down` → `surface.split`; `close` → `surface.close` |
 | `GET /api/notifications`, `POST /api/notifications/{read,dismiss,clear_all}` | `notification.*` |
 | `GET /api/secrets`, `POST /api/secrets/{answer,decline} {id, value?}` | Open `psycommux secret` requests; the answer goes back over the local socket, with `notification.create` / `notification.dismiss` around it |
 | `GET /api/push`, `POST /api/push/{subscribe,unsubscribe,test}` | The VAPID public key and this device's Web Push subscription; pushes follow `notification.created` events |

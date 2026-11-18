@@ -34,6 +34,7 @@ const state = {
   file: null,
   pendingNew: null,                     // {wsId, until}
   newCwd: null,                         // the folder input on the New screen
+  wsFilter: saved("cmuxWsFilter", "all"), // "all" | "needs"
 };
 
 async function api(path, body, signal) {
@@ -41,7 +42,7 @@ async function api(path, body, signal) {
   const res = await fetch(path, opts);
   if (res.status === 401) { location.href = "/"; throw new Error("unauthorized"); }
   const data = await res.json();
-  if (!res.ok) throw new Error(data.message || data.error || res.statusText);
+  if (!res.ok) throw Object.assign(new Error(data.message || data.error || res.statusText), { code: data.error });
   return data;
 }
 
@@ -157,7 +158,9 @@ setInterval(() => { if (!document.hidden) loadTree(); }, 10000);  // agent state
 function select(wsId, surfaceId, view) {
   state.sel = view ? { wsId, view } : { wsId, surfaceId };
   save("cmuxSel", state.sel);
-  if (wsId && !state.expanded.has(wsId)) { state.expanded.add(wsId); save("cmuxExpanded", [...state.expanded]); }
+  // On a phone only the open workspace stays unfolded, so the list stays short.
+  if (wsId && PHONE.matches) { state.expanded = new Set([wsId]); save("cmuxExpanded", [wsId]); }
+  else if (wsId && !state.expanded.has(wsId)) { state.expanded.add(wsId); save("cmuxExpanded", [...state.expanded]); }
   document.body.classList.remove("show-nav");
   render();
   markRead();
@@ -179,7 +182,13 @@ function renderNav() {
   const needle = $("filter").value.trim().toLowerCase();
   list.replaceChildren();
   const sel = state.sel || {};
-  for (const ws of allWorkspaces()) {
+  const all = allWorkspaces();
+  const needs = all.filter(needsYou);
+  for (const b of $("wsfilter").children) {
+    b.classList.toggle("on", b.dataset.f === state.wsFilter);
+    if (b.dataset.f === "needs") b.textContent = needs.length ? `Needs you · ${needs.length}` : "Needs you";
+  }
+  for (const ws of state.wsFilter === "needs" && !needle ? needs : all) {
     const items = wsItems(ws);
     const hay = [ws.title, ws.description, ws.latest_notification_text, ws.directory, ws.branch, ...items.map(itemLabel)].join(" ").toLowerCase();
     if (needle && !hay.includes(needle)) continue;
@@ -187,15 +196,21 @@ function renderNav() {
     const attn = wsAttention(ws);
     const unread = unreadFor(ws);
     const opt = sidebarOptions();
+    // On a phone a closed row is two lines: the name and what matters most. Opening it
+    // shows everything the Mac's sidebar shows, and the panels.
+    const compact = PHONE.matches && !open;
+    const more = el("button", { className: "ws-more", textContent: "⋯", title: "Workspace actions" });
+    more.onclick = (e) => { e.stopPropagation(); showMenu(more, workspaceMenu(ws)); };
     const head = el("div", { className: "ws-head" },
       ws.custom_color ? el("span", { className: "rail", style: "background:" + ws.custom_color }) : null,
       el("span", { className: "chev", textContent: "▸" }),
       el("div", { className: "meta" },
         el("div", { className: "name" + (opt.wrapWorkspaceTitles ? " wrap" : "") },
           ws.pinned ? el("span", { className: "pin", textContent: "📌" }) : null, ws.title || ws.ref),
-        ...wsDetails(ws, attn, opt)),
+        ...(compact ? wsSummary(ws, attn, opt) : wsDetails(ws, attn, opt))),
       attn.working && !attn.needsInput && opt.showAgentActivity ? el("span", { className: "spin" }) : null,
-      unread ? el("span", { className: "badge", textContent: unread }) : null);
+      unread ? el("span", { className: "badge", textContent: unread > 99 ? "99+" : unread }) : null,
+      more);
     head.onclick = () => {
       if (state.expanded.has(ws.id)) state.expanded.delete(ws.id); else state.expanded.add(ws.id);
       save("cmuxExpanded", [...state.expanded]);
@@ -220,8 +235,38 @@ function renderNav() {
     box.append(itemsBox);
     list.append(box);
   }
-  if (!list.children.length) list.append(el("div", { className: "empty", textContent: needle ? "No matches." : "No workspaces." }));
+  if (!list.children.length) list.append(el("div", { className: "empty", textContent: needle ? "No matches." : state.wsFilter === "needs" ? "Nothing needs you." : "No workspaces." }));
   list.scrollTop = scroll;
+}
+
+for (const b of $("wsfilter").children) {
+  b.onclick = () => { state.wsFilter = b.dataset.f; save("cmuxWsFilter", state.wsFilter); $("wslist").scrollTop = 0; renderNav(); };
+}
+
+const GRAY = new Set(["#8E8E93", "#98989D", "#999999", "#808080", "#AEAEB2"]);
+// Unread notifications, or an agent waiting for an answer.
+function needsYou(ws) { return unreadFor(ws) > 0 || wsAttention(ws).needsInput; }
+
+// One line for a closed row on a phone: an agent waiting, else a colored status
+// (a "decide" pill), else the latest notification, the description, a status, the folder.
+function wsSummary(ws, attn, opt) {
+  if (attn.needsInput) return [el("div", { className: "sub attn", textContent: "Needs your input" })];
+  if (opt.hideAllDetails) return [];
+  const sb = ws.sidebar || {};
+  const statuses = opt.showCustomMetadata ? (sb.statuses || []) : [];
+  const status = (st) => {
+    const line = el("div", { className: "d-line d-status d-sum" }, statusIcon(st.icon), el("span", { className: "grow", textContent: plainMarkdown(String(st.value || "")) }));
+    if (st.color) line.style.color = st.color;
+    return [line];
+  };
+  // Gray pills ("Idle") and plain ones ("claude-code · Done") say little; a colored one
+  // ("待你决定", "已推进 → Rework") is someone asking for something.
+  const colored = statuses.find((st) => st.color && !GRAY.has(String(st.color).toUpperCase()));
+  if (colored) return status(colored);
+  const text = (opt.showNotificationMessage && ws.latest_notification_text) || (opt.showWorkspaceDescription && ws.description);
+  if (text) return [el("div", { className: "d-note d-sum", textContent: oneLine(plainMarkdown(String(text))) })];
+  const where = [ws.branch && "⎇ " + ws.branch, shortPath(ws.directory, true)].filter(Boolean).join(" · ");
+  return where ? [el("div", { className: "d-line mono", textContent: where })] : [];
 }
 
 // ---- workspace rows: the details cmux's own sidebar shows -------------------------
@@ -574,8 +619,11 @@ function unmountView() {
 }
 
 function renderHeader(ws, surface, view) {
-  $("title").textContent = view === "new" ? "New Claude session" : surface ? itemLabel(surface) : ws ? ws.title || ws.ref : "psycommux";
-  $("subtitle").textContent = view === "new" ? "" : ws ? [surface ? ws.title : null, ws.directory, ws.branch && ws.branch + (ws.git_dirty ? "*" : "")].filter(Boolean).join(" · ") : "";
+  // The workspace is what you look for in the list; the panel goes underneath.
+  const wsName = ws ? ws.title || ws.ref : "";
+  const panel = surface ? itemLabel(surface) : "";
+  $("title").textContent = view === "new" ? "New Claude session" : wsName || panel || "psycommux";
+  $("subtitle").textContent = view === "new" ? "" : ws ? [panel && panel !== wsName && panel !== ws.directory ? panel : null, ws.directory, ws.branch && ws.branch + (ws.git_dirty ? "*" : "")].filter(Boolean).join(" · ") : "";
   const actions = $("actions");
   actions.replaceChildren();
   if (surface && surface.agent && surface.agent.chat) {
@@ -589,25 +637,134 @@ function renderHeader(ws, surface, view) {
     b.onclick = () => { state.fontMode = state.fontMode === "fit" ? "read" : "fit"; save("cmuxFontMode", state.fontMode); renderHeader(ws, surface, view); document.querySelectorAll("#view pre.term").forEach(restoreScroll); };
     actions.append(b);
   }
-  if (ws) {
-    const more = el("button", { className: "icon", textContent: "⋯", title: "More" });
-    more.onclick = (e) => {
-      e.stopPropagation();
-      const entries = [["Show on Mac", async () => { await api("/api/workspace/select", { workspace_id: ws.id }); scheduleTree(100); }]];
-      if (surface && surface.type === "browser" && pageUrl(surface)) entries.push(["Open on this device", () => openHere(surface)]);
-      showMenu(more, entries);
-    };
+  if (ws && view !== "new") {
+    const more = el("button", { className: "icon", textContent: "⋯", title: "Panel and workspace actions" });
+    more.onclick = (e) => { e.stopPropagation(); showMenu(more, surface ? panelMenu(ws, surface) : workspaceMenu(ws)); };
     actions.append(more);
   }
 }
 
+// Menu entries: [label, fn, "danger"?], or null for a separator.
 function showMenu(anchor, entries) {
   const pop = $("menuPop");
-  pop.replaceChildren(...entries.map(([label, fn]) => { const b = el("button", { textContent: label }); b.onclick = () => { pop.hidden = true; fn(); }; return b; }));
-  const r = anchor.getBoundingClientRect();
-  pop.style.top = r.bottom + 4 + "px";
-  pop.style.right = Math.max(8, innerWidth - r.right) + "px";
+  pop.replaceChildren(...entries.map((entry) => {
+    if (!entry) return el("div", { className: "sep" });
+    const [label, fn, kind] = entry;
+    const b = el("button", { textContent: label, className: kind || "" });
+    b.onclick = (e) => { e.stopPropagation(); pop.hidden = true; fn(); };
+    return b;
+  }));
+  pop.style.visibility = "hidden";
   pop.hidden = false;
+  const r = anchor.getBoundingClientRect();
+  const h = pop.offsetHeight;
+  const below = r.bottom + 4 + h <= innerHeight - 8;
+  pop.style.top = (below ? r.bottom + 4 : Math.max(8, r.top - 4 - h)) + "px";
+  pop.style.right = Math.max(8, innerWidth - r.right) + "px";
+  pop.style.left = "";
+  pop.style.visibility = "";
+}
+
+// ---- dialogs: a sheet in the page, not window.confirm/prompt ----------------------
+// ask({title, message, input, confirm, danger}) resolves to the typed text (or true), or null.
+function ask({ title, message, input, confirm = "OK", danger = false, info = false }) {
+  return new Promise((done) => {
+    const scrim = el("div", { className: "ask-scrim" });
+    const field = input !== undefined ? el("input", { className: "ask-input", value: input, autocapitalize: "off", autocorrect: "off", spellcheck: false, enterKeyHint: "done" }) : null;
+    const finish = (value) => { scrim.remove(); done(value); };
+    const ok = el("button", { className: "ask-ok" + (danger ? " danger" : ""), textContent: confirm });
+    const cancel = el("button", { className: "ask-cancel", textContent: "Cancel" });
+    ok.onclick = () => finish(field ? field.value.trim() || null : true);
+    cancel.onclick = () => finish(null);
+    scrim.onclick = (e) => { if (e.target === scrim) finish(null); };
+    if (field) field.onkeydown = (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); ok.click(); } if (e.key === "Escape") cancel.click(); };
+    scrim.append(el("div", { className: "ask" },
+      el("div", { className: "ask-title", textContent: title }),
+      message ? el("div", { className: "ask-msg", textContent: message }) : null,
+      field,
+      el("div", { className: "ask-buttons" }, info ? null : cancel, ok)));
+    document.body.append(scrim);
+    // Never leave a destructive button focused, where Return would press it.
+    if (field) { field.focus(); field.select(); } else (danger ? cancel : ok).focus();
+  });
+}
+
+// ---- workspace and panel actions ------------------------------------------------------
+function failed(e) { ask({ title: "That did not work", message: e.message, info: true }); }
+async function wsAction(ws, action, extra = {}) {
+  try { await api("/api/workspace/action", { workspace_id: ws.id, action, ...extra }); }
+  catch (e) { failed(e); return false; }
+  scheduleTree(150);
+  return true;
+}
+async function panelAction(surface, action, extra = {}) {
+  try { return await api("/api/surface/action", { surface_id: surface.id, action, ...extra }); }
+  catch (e) { failed(e); return null; }
+  finally { scheduleTree(150); }
+}
+// Close; when cmux says something is still running there, ask once more and force it.
+async function closeThing(kind, name, call, note = "") {
+  if (!(await ask({ title: `Close ${kind}?`, message: `“${name}” will be closed on the Mac.${note}`, confirm: "Close", danger: true }))) return false;
+  try { await call(false); return true; }
+  catch (e) {
+    if (e.code !== "confirmation_required") { failed(e); return false; }
+  }
+  const sure = await ask({ title: "Something is still running", message: `A program is running in “${name}” (Claude, a server, a build…). Closing ends it.`, confirm: "End it and close", danger: true });
+  if (!sure) return false;
+  try { await call(true); return true; } catch (e) { failed(e); return false; }
+}
+// The tree refresh notices the panel or workspace is gone and opens another.
+function afterClose() { scheduleTree(100); }
+function workspaceMenu(ws) {
+  const name = ws.title || ws.ref;
+  const items = wsItems(ws);
+  const last = items[items.length - 1];
+  const panes = (ws.panes || []).length;
+  const entries = [
+    ["Rename…", async () => {
+      const title = await ask({ title: "Rename workspace", input: name, confirm: "Rename" });
+      if (title && title !== name) wsAction(ws, "rename", { title });
+    }],
+    [ws.pinned ? "Unpin" : "Pin", () => wsAction(ws, ws.pinned ? "unpin" : "pin")],
+    [unreadFor(ws) ? "Mark as read" : "Mark as unread", () => wsAction(ws, unreadFor(ws) ? "mark-read" : "mark-unread")],
+    null,
+  ];
+  if (last) entries.push(["New terminal", () => panelAction(last, "new-terminal-right")]);
+  if (ws.directory) entries.push(["New Claude session in this folder", () => { save("cmuxLastDir", ws.directory); select(ws.id, null, "new"); }]);
+  entries.push(["Show on Mac", async () => { await api("/api/workspace/select", { workspace_id: ws.id }).catch(failed); scheduleTree(100); }]);
+  if (panes > 1) entries.push(["Even out splits on Mac", () => wsAction(ws, "equalize")]);
+  entries.push(null, ["Close workspace…", async () => {
+    // cmux keeps pinned workspaces open; unpin first, as you would on the Mac.
+    const close = async (force) => {
+      if (ws.pinned) { await api("/api/workspace/action", { workspace_id: ws.id, action: "unpin" }); ws.pinned = false; }
+      return api("/api/workspace/action", { workspace_id: ws.id, action: "close", force });
+    };
+    if (await closeThing("workspace", name, close, ws.pinned ? " It is pinned; it will be unpinned first." : "")) afterClose();
+  }, "danger"]);
+  return entries;
+}
+function panelMenu(ws, surface) {
+  const name = itemLabel(surface);
+  const entries = [
+    ["Rename panel…", async () => {
+      const title = await ask({ title: "Rename panel", input: name, confirm: "Rename" });
+      if (title && title !== name) panelAction(surface, "rename", { title });
+    }],
+    ["New terminal tab", () => panelAction(surface, "new-terminal-right")],
+    ["New browser tab…", async () => {
+      const url = await ask({ title: "Open a web page", input: "https://", confirm: "Open" });
+      if (url && url !== "https://") panelAction(surface, "new-browser-right", { url });
+    }],
+    ["Split right on Mac", () => panelAction(surface, "split-right")],
+    ["Split down on Mac", () => panelAction(surface, "split-down")],
+    ["Move to a new workspace", () => panelAction(surface, "move-to-new-workspace")],
+  ];
+  if (surface.type === "browser" && pageUrl(surface)) entries.push(["Open on this device", () => openHere(surface)]);
+  entries.push(null, ["Workspace…", () => showMenu($("actions").lastElementChild || $("menu"), workspaceMenu(ws))]);
+  entries.push(null, ["Close panel…", async () => {
+    if (await closeThing("panel", name, (force) => api("/api/surface/action", { surface_id: surface.id, action: "close", force }))) afterClose();
+  }, "danger"]);
+  return entries;
 }
 document.addEventListener("click", () => { $("menuPop").hidden = true; document.body.classList.remove("show-notifs"); });
 
@@ -1293,7 +1450,15 @@ function updateComposer(view, surface) {
   send.classList.toggle("stop", !!stop);
   send.textContent = stop ? "■" : "↑";
   send.title = stop ? "Stop Claude" : "Send";
+  send.classList.toggle("idle", !stop && !$("input").value.trim() && mode !== "new");
   $("attachBtn").hidden = !(mode === "chat" || mode === "terminal" || mode === "new");
+  // An ended session takes no messages: its terminal is a shell again.
+  const ended = !!chat && chat.state === "ended";
+  $("input").disabled = ended;
+  if (ended) $("attachBtn").hidden = true;
+  box.classList.toggle("ended", ended);
+  if (ended) $("input").placeholder = "This session has ended";
+  else if (mode === composerMode && mode === "chat") $("input").placeholder = "Reply to Claude";
   if (mode === composerMode) return;
   stopDictation(true);
   composerMode = mode;
@@ -1352,7 +1517,7 @@ function growInput() {
   box.style.height = "auto";
   box.style.height = Math.min(box.scrollHeight, 220) + "px";
   const { surface } = selected();
-  if (composerMode === "chat") updateComposer("chat", surface);
+  if (composerMode) updateComposer(composerMode, surface);
 }
 $("input").addEventListener("input", growInput);
 $("input").addEventListener("keydown", (e) => {
@@ -1447,6 +1612,15 @@ function jumpTo(n) {
   else if (n.workspace_id) openWorkspace(n.workspace_id);
 }
 
+// "10:43 AM" today, "Yesterday 10:43 AM", then "Nov 16 10:43 AM".
+function whenText(d) {
+  const clock = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((day(new Date()) - day(d)) / 86400000);
+  if (days === 0) return clock;
+  if (days === 1) return "Yesterday " + clock;
+  return d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + clock;
+}
 function renderNotifications() {
   const list = $("nlist");
   list.replaceChildren();
@@ -1470,7 +1644,7 @@ function renderNotifications() {
       loadNotifications();
       scheduleTree();
     };
-    const time = n.created_at ? new Date(n.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+    const time = n.created_at ? whenText(new Date(n.created_at)) : "";
     const item = el("div", { className: "n" + (n.is_read ? "" : " unread") },
       el("span", { className: "dot" }),
       el("div", { className: "main" },
@@ -1532,6 +1706,8 @@ function sameKey(buffer, bytes) {
 function showPushState(text) {
   $("pushState").textContent = "Notifications on this device: " + text;
   $("enableNotify").textContent = state.pushOn ? "Turn off" : "Enable";
+  // Blocked or unsupported: the button could not change anything.
+  $("enableNotify").hidden = !state.pushOn && canPush && Notification.permission === "denied" || !canPush;
   $("testPush").hidden = !state.pushOn;
 }
 // Subscribe (when `ask`, from a tap: it may prompt), or resend an existing
@@ -1542,7 +1718,11 @@ async function syncPush(ask) {
     showPushState(/iPhone|iPad/.test(navigator.userAgent) ? "add psycommux to the Home Screen first" : "not supported here");
     return;
   }
-  if (Notification.permission === "denied") { state.pushOn = false; showPushState("blocked in settings"); return; }
+  if (Notification.permission === "denied") {
+    state.pushOn = false;
+    showPushState(/iPhone|iPad/.test(navigator.userAgent) ? "blocked; allow them in Settings → Notifications → psycommux" : "blocked; allow them in the site settings");
+    return;
+  }
   if (!ask && Notification.permission !== "granted") { state.pushOn = false; showPushState("off"); return; }
   try {
     if (ask && (await Notification.requestPermission()) !== "granted") { showPushState("not allowed"); return; }
@@ -1930,7 +2110,11 @@ async function loadOlder(chat) {
 function setChatState(chat, value) {
   chat.state = value;
   const cur = selected().surface;
-  if (cur && cur.agent && cur.agent.session_id === chat.sid) { cur.agent.state = value; updateComposer("chat", cur); renderNav(); }
+  if (cur && cur.agent && cur.agent.session_id === chat.sid) {
+    cur.agent.state = value;
+    if (viewFor(cur) === "chat") updateComposer("chat", cur);
+    renderNav();
+  }
   const st = chat.status;
   st.replaceChildren();
   st.className = "chat-status " + value;
@@ -1955,7 +2139,21 @@ function setChatState(chat, value) {
     st.append(el("div", { className: "peek-head", textContent: "Claude needs your input" }), el("pre", { className: "peek", textContent: chat.peek }), keys);
     refreshPeek(chat);
   } else if (value === "ended") {
-    st.append(el("span", { textContent: "This session has ended." }));
+    // `claude --resume <id>` in the same terminal, from the session's folder.
+    const resume = el("button", { className: "resume", textContent: "Resume session" });
+    resume.onclick = async () => {
+      resume.disabled = true;
+      resume.textContent = "Starting…";
+      try {
+        await api("/api/chat/resume", { session_id: chat.sid });
+        scheduleTree(1500);
+      } catch (e) {
+        resume.disabled = false;
+        resume.textContent = "Resume session";
+        failed(e);
+      }
+    };
+    st.append(el("span", { textContent: "This session has ended." }), resume);
   }
 }
 
@@ -2038,10 +2236,25 @@ async function sendChat(s, text) {
 function fitFont(pre, columns) {
   const width = pre.clientWidth - 10;
   if (!columns || width <= 0) return;
-  if (PHONE.matches && state.fontMode === "read") { pre.style.fontSize = "11px"; return; }
-  // Menlo / SF Mono advance is about 0.6em. Phones go smaller so the whole width fits.
-  const floor = PHONE.matches ? 4.5 : 7;
-  pre.style.fontSize = Math.max(floor, Math.min(13, width / (columns * 0.6))) + "px";
+  if (PHONE.matches && state.fontMode === "read") pre.style.fontSize = "11px";
+  else {
+    // Menlo / SF Mono advance is about 0.6em. Phones go smaller so the whole width fits.
+    const floor = PHONE.matches ? 4.5 : 7;
+    pre.style.fontSize = Math.max(floor, Math.min(13, width / (columns * 0.6))) + "px";
+  }
+  measureCell(pre);
+}
+// The real width of one cell at this size (0.6em, give or take rounding), for wide characters.
+function measureCell(pre) {
+  const size = pre.style.fontSize;
+  if (pre.cellFor === size) return;
+  const probe = document.createElement("span");
+  probe.textContent = "0".repeat(40);
+  probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
+  pre.append(probe);
+  const cell = probe.getBoundingClientRect().width / 40;
+  probe.remove();
+  if (cell > 0) { pre.style.setProperty("--cell", cell + "px"); pre.cellFor = size; }
 }
 
 // Scroll position lives in state, not in the <pre>: the tree refresh rebuilds
@@ -2085,6 +2298,24 @@ function paintScreen(pre, screen) {
   restoreScroll(pre);
 }
 
+// Wide characters (CJK, fullwidth forms, most emoji) take two terminal cells, but the
+// font draws them narrower or wider than two Latin cells, so box-drawing tables
+// drift out of line. Give each its two cells exactly.
+const WIDE = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F300}-\u{1F64F}\u{1F900}-\u{1F9FF}\u{20000}-\u{3FFFD}]/u;
+const WIDE_RUN = new RegExp("(" + WIDE.source + "+)", "u");
+function cells(text) {
+  if (!WIDE.test(text)) return [text];
+  return text.split(WIDE_RUN).filter(Boolean).map((part) => {
+    if (!WIDE.test(part)) return part;
+    const n = [...part].length;
+    const span = document.createElement("span");
+    span.className = "w2";
+    span.style.width = `calc(var(--cell, 0.6em) * ${2 * n})`;
+    span.textContent = part;
+    return span;
+  });
+}
+
 function paintGrid(pre, grid) {
   pre.style.color = grid.foreground;
   pre.style.background = grid.background;
@@ -2094,7 +2325,7 @@ function paintGrid(pre, grid) {
   grid.lines.forEach((spans, lineNo) => {
     let col = 0;
     let pending = "";
-    const flush = () => { if (pending) { frag.append(pending); pending = ""; } };
+    const flush = () => { if (pending) { frag.append(...cells(pending)); pending = ""; } };
     const styled = (text, sid, extraClass) => {
       const css = grid.styles[String(sid)] || "";
       if (!css && !extraClass) { pending += text; return; }
@@ -2102,7 +2333,7 @@ function paintGrid(pre, grid) {
       const span = document.createElement("span");
       if (css) span.style.cssText = css;
       if (extraClass) span.className = extraClass;
-      span.textContent = text;
+      span.append(...cells(text));
       frag.append(span);
     };
     const cursorCol = cur.visible && cur.line === lineNo ? cur.column : -1;

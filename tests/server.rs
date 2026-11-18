@@ -1686,3 +1686,194 @@ fn upload_names_are_safe_to_paste() {
     assert_eq!(upload_name(".hidden", ""), "hidden");
     assert_eq!(upload_name("", "application/octet-stream"), "file");
 }
+
+// -- workspace and panel menus -------------------------------------------------
+
+#[tokio::test]
+async fn workspace_and_panel_actions_map_to_cmux() {
+    let h = Harness::new().await;
+    let post = |path: &'static str, body: Value| {
+        let h = &h;
+        async move { h.request("POST", path, Some(body), &[], true).await }
+    };
+    for (body, method, params) in [
+        (
+            json!({"workspace_id": "W", "action": "rename", "title": "New name"}),
+            "workspace.rename",
+            json!({"workspace_id": "W", "title": "New name"}),
+        ),
+        (
+            json!({"workspace_id": "W", "action": "pin"}),
+            "workspace.action",
+            json!({"workspace_id": "W", "action": "pin"}),
+        ),
+        (
+            json!({"workspace_id": "W", "action": "mark-unread"}),
+            "workspace.action",
+            json!({"workspace_id": "W", "action": "mark-unread"}),
+        ),
+        (
+            json!({"workspace_id": "W", "action": "equalize"}),
+            "workspace.equalize_splits",
+            json!({"workspace_id": "W"}),
+        ),
+    ] {
+        let r = post("/api/workspace/action", body).await;
+        assert_eq!(r.status, 200, "{}", r.text());
+        assert_eq!(h.fake.last(method), params);
+    }
+    for (body, method, params) in [
+        (
+            json!({"surface_id": "S", "action": "rename", "title": "logs"}),
+            "tab.action",
+            json!({"tab_id": "S", "action": "rename", "title": "logs"}),
+        ),
+        (
+            json!({"surface_id": "S", "action": "new-browser-right", "url": "example.com"}),
+            "tab.action",
+            json!({"tab_id": "S", "action": "new-browser-right", "focus": false, "url": "https://example.com"}),
+        ),
+        (
+            json!({"surface_id": "S", "action": "split-down"}),
+            "surface.split",
+            json!({"surface_id": "S", "direction": "down", "focus": false}),
+        ),
+    ] {
+        let r = post("/api/surface/action", body).await;
+        assert_eq!(r.status, 200, "{}", r.text());
+        assert_eq!(h.fake.last(method), params);
+    }
+    let r = post(
+        "/api/surface/action",
+        json!({"surface_id": "S", "action": "new-browser-right", "url": "javascript:alert(1)"}),
+    )
+    .await;
+    assert_eq!(r.status, 400);
+    assert_eq!(
+        post(
+            "/api/workspace/action",
+            json!({"workspace_id": "W", "action": "close-others"})
+        )
+        .await
+        .status,
+        400
+    );
+    assert_eq!(
+        post(
+            "/api/surface/action",
+            json!({"surface_id": "S", "action": "duplicate"})
+        )
+        .await
+        .status,
+        400
+    );
+}
+
+#[tokio::test]
+async fn closing_a_busy_workspace_or_panel_needs_force() {
+    let h = Harness::new().await;
+    let r = h
+        .request(
+            "POST",
+            "/api/workspace/action",
+            Some(json!({"workspace_id": "W", "action": "close"})),
+            &[],
+            true,
+        )
+        .await;
+    assert_eq!(r.status, 409);
+    assert_eq!(r.json()["error"], "confirmation_required");
+    let r = h
+        .request(
+            "POST",
+            "/api/workspace/action",
+            Some(json!({"workspace_id": "W", "action": "close", "force": true})),
+            &[],
+            true,
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(
+        h.fake.last("workspace.close"),
+        json!({"workspace_id": "W", "force": true})
+    );
+
+    let r = h
+        .request(
+            "POST",
+            "/api/surface/action",
+            Some(json!({"surface_id": "S", "action": "close"})),
+            &[],
+            true,
+        )
+        .await;
+    assert_eq!(r.status, 409);
+    let r = h
+        .request(
+            "POST",
+            "/api/surface/action",
+            Some(json!({"surface_id": "S", "action": "close", "force": true})),
+            &[],
+            true,
+        )
+        .await;
+    assert_eq!(r.status, 200);
+}
+
+#[tokio::test]
+async fn an_ended_session_resumes_in_its_folder() {
+    let (h, _) = chat_harness().await;
+    let ended = h.tmp.path().join("ended.jsonl");
+    let mut t = jl(
+        json!({"type": "user", "cwd": "/Users/me/my project", "message": {"role": "user", "content": "hi"}}),
+    );
+    t.extend(transcript());
+    std::fs::write(&ended, t).unwrap();
+    let p = ended.to_string_lossy().into_owned();
+    h.fake.set(|st| {
+        st.chat_sessions.push(
+            json!({"session_id": "6d3dc39b-15f9-4b74-bc6b-ad70c07b5c01", "agent": "claude",
+            "surface_id": SURF2_ID, "workspace_id": WS_ID, "transcript_path": p, "state": "ended"}),
+        );
+    });
+    let r = h
+        .request(
+            "POST",
+            "/api/chat/resume",
+            Some(json!({"session_id": "6d3dc39b-15f9-4b74-bc6b-ad70c07b5c01"})),
+            &[],
+            true,
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(
+        h.fake.last("surface.send_text"),
+        json!({"surface_id": SURF2_ID, "text": "cd '/Users/me/my project' && claude --resume 6d3dc39b-15f9-4b74-bc6b-ad70c07b5c01"})
+    );
+    assert_eq!(
+        h.fake.last("surface.send_key"),
+        json!({"surface_id": SURF2_ID, "key": "enter"})
+    );
+
+    // A live session is not started twice; a non-UUID id is not typed into a shell.
+    let r = h
+        .request(
+            "POST",
+            "/api/chat/resume",
+            Some(json!({"session_id": "sess-1"})),
+            &[],
+            true,
+        )
+        .await;
+    assert_eq!(r.status, 400);
+    let r = h
+        .request(
+            "POST",
+            "/api/chat/resume",
+            Some(json!({"session_id": "old"})),
+            &[],
+            true,
+        )
+        .await;
+    assert_eq!(r.status, 400);
+}

@@ -512,3 +512,23 @@ pub fn session_state(raw: &str) -> String {
         raw.into()
     }
 }
+
+/// The folder a Claude Code session ran in: the `cwd` of its first transcript
+/// lines that carry one.
+pub fn session_cwd(path: &Path) -> Option<String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    for line in io::BufReader::new(file).lines().take(200) {
+        let Ok(line) = line else { break };
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+            if let Some(cwd) = v
+                .get("cwd")
+                .and_then(|c| c.as_str())
+                .filter(|c| c.starts_with('/'))
+            {
+                return Some(cwd.to_string());
+            }
+        }
+    }
+    None
+}

@@ -591,7 +591,7 @@ fn page_response(data: &'static str, content_type: &str) -> Response<Body> {
 fn error_status(code: &str) -> StatusCode {
     match code {
         "not_found" => StatusCode::NOT_FOUND,
-        "unsupported" => StatusCode::CONFLICT,
+        "unsupported" | "confirmation_required" => StatusCode::CONFLICT,
         "bad_request" | "too_large" | "invalid_params" => StatusCode::BAD_REQUEST,
         _ => StatusCode::BAD_GATEWAY,
     }
@@ -1202,6 +1202,73 @@ async fn dispatch_post(
                 .await?;
             ok()
         }
+        "/api/workspace/action" => {
+            // The Mac sidebar's context menu, from the phone. Closing something
+            // with a running process answers confirmation_required (409) unless
+            // `force` is set.
+            let workspace_id = body.need("workspace_id")?;
+            let id = json!(workspace_id);
+            let (method, params) = match body.need("action")?.as_str() {
+                "rename" => (
+                    "workspace.rename",
+                    json!({"workspace_id": id, "title": body.need("title")?}),
+                ),
+                a @ ("pin" | "unpin" | "mark-read" | "mark-unread") => {
+                    ("workspace.action", json!({"workspace_id": id, "action": a}))
+                }
+                "equalize" => ("workspace.equalize_splits", json!({"workspace_id": id})),
+                "close" => (
+                    "workspace.close",
+                    json!({"workspace_id": id, "force": body.truthy("force")}),
+                ),
+                other => {
+                    return Err(CmuxError::new(
+                        "bad_request",
+                        format!("unknown workspace action {other}"),
+                    ))
+                }
+            };
+            ok_or(client.call(method, params).await?, ok())
+        }
+        "/api/surface/action" => {
+            let surface_id = body.need("surface_id")?;
+            let id = json!(surface_id);
+            let (method, params) = match body.need("action")?.as_str() {
+                "rename" => (
+                    "tab.action",
+                    json!({"tab_id": id, "action": "rename", "title": body.need("title")?}),
+                ),
+                a @ ("new-terminal-right" | "new-browser-right" | "move-to-new-workspace") => {
+                    let mut p = json!({"tab_id": id, "action": a, "focus": false});
+                    if let Some(url) = body.opt_str("url") {
+                        p["url"] = json!(navigable_url(&url)?);
+                    }
+                    ("tab.action", p)
+                }
+                "split-right" | "split-down" => {
+                    let direction = if body.need("action")? == "split-right" {
+                        "right"
+                    } else {
+                        "down"
+                    };
+                    (
+                        "surface.split",
+                        json!({"surface_id": id, "direction": direction, "focus": false}),
+                    )
+                }
+                "close" => (
+                    "surface.close",
+                    json!({"surface_id": id, "force": body.truthy("force")}),
+                ),
+                other => {
+                    return Err(CmuxError::new(
+                        "bad_request",
+                        format!("unknown panel action {other}"),
+                    ))
+                }
+            };
+            ok_or(client.call(method, params).await?, ok())
+        }
         "/api/workspace/create" => {
             let mut params = json!({});
             for key in ["cwd", "window_id"] {
@@ -1490,6 +1557,41 @@ async fn chat(state: &Arc<AppState>, action: &str, body: &Body_<'_>) -> Result<O
                 }
                 Err(e) => return Err(e),
             }
+        }
+        "resume" => {
+            // Start an ended session again in its terminal, from the folder it ran in.
+            let (record, path) = state.agents.transcript(&session_id).await?;
+            if state_of(&record) != "ended" {
+                return Err(CmuxError::new(
+                    "bad_request",
+                    "this session is still running",
+                ));
+            }
+            if !session_id
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == '-')
+            {
+                return Err(CmuxError::new("bad_request", "not a Claude session id"));
+            }
+            let surface = field(&record, "surface_id");
+            let cwd = blocking(move || Ok(agentchat::session_cwd(&path))).await?;
+            let command = match cwd {
+                Some(dir) => format!("cd {} && claude --resume {session_id}", shell_quote(&dir)),
+                None => format!("claude --resume {session_id}"),
+            };
+            client
+                .call(
+                    "surface.send_text",
+                    json!({"surface_id": surface, "text": command}),
+                )
+                .await?;
+            client
+                .call(
+                    "surface.send_key",
+                    json!({"surface_id": surface, "key": "enter"}),
+                )
+                .await?;
+            json!({"ok": true, "surface_id": surface})
         }
         _ => return Ok(None),
     };

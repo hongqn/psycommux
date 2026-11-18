@@ -228,7 +228,11 @@ impl FakeCmux {
             st.streams.push(tx);
             return Answer::Stream(rx);
         }
-        let frame = if st.no_wait_method && method == "surface.wait_text_change" {
+        let closing = matches!(method.as_str(), "workspace.close" | "surface.close");
+        let frame = if closing && req["params"]["force"] != json!(true) {
+            json!({"id": id, "ok": false, "error": {"code": "confirmation_required",
+                   "message": "Surface has a running process; retry with force=true"}})
+        } else if st.no_wait_method && method == "surface.wait_text_change" {
             json!({"id": id, "ok": false, "error": {"code": "method_not_found", "message": "Unknown method"}})
         } else {
             match result(&mut st, &method, &req["params"]) {
@@ -340,6 +344,13 @@ fn result(st: &mut FakeState, method: &str, params: &Value) -> Option<Value> {
         "browser.url.get" => json!({"url": "https://example.com/"}),
         "browser.eval" => json!({"value": "a"}),
         "workspace.create" => json!({"workspace_id": "new-ws", "workspace_ref": "workspace:9"}),
+        "workspace.rename"
+        | "workspace.action"
+        | "workspace.equalize_splits"
+        | "workspace.close"
+        | "tab.action"
+        | "surface.split"
+        | "surface.close" => json!({"done": method}),
         "chat.sessions.dump" => json!({"sessions": st.chat_sessions}),
         "mobile.chat.send" | "mobile.chat.interrupt" if st.chat_send_lost => return None,
         _ => json!({}),
