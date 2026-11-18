@@ -401,6 +401,7 @@ impl Harness {
         state.access_log = placeholder.access_log;
         state.tls = placeholder.tls;
         state.files = placeholder.files;
+        state.uploads = tmp.path().join("uploads");
         let state = Arc::new(state);
         let h = Self {
             tmp,

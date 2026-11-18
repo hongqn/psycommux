@@ -491,6 +491,8 @@ pub struct AppState {
     pub access_log: bool,
     /// Serving HTTPS ourselves: the login cookie gets `Secure`.
     pub tls: bool,
+    /// Where files sent from the phone are kept for agents to read.
+    pub uploads: PathBuf,
 }
 
 impl AppState {
@@ -507,6 +509,7 @@ impl AppState {
             allowed_origins: Vec::new(),
             access_log: false,
             tls: false,
+            uploads: default_uploads_dir(),
         }
     }
 }
@@ -754,6 +757,12 @@ async fn post(state: &Arc<AppState>, req: Request<Body>) -> Response<Body> {
     if !same_origin(state, headers) {
         return json_response(StatusCode::FORBIDDEN, &json!({"error": "bad_origin"}), None);
     }
+    if parts.uri.path() == "/api/upload" {
+        return match upload(state, headers, body).await {
+            Ok(path) => json_response(StatusCode::OK, &json!({"path": path}), Some(headers)),
+            Err(e) => error_response(&e),
+        };
+    }
     let body = match read_json(headers, body).await {
         Ok(body) => body,
         Err(e) => return error_response(&e),
@@ -768,6 +777,127 @@ async fn post(state: &Arc<AppState>, req: Request<Body>) -> Response<Body> {
         Ok(None) => json_response(StatusCode::NOT_FOUND, &json!({"error": "not_found"}), None),
         Err(e) => error_response(&e),
     }
+}
+
+/// `~/.psycommux/uploads`.
+pub fn default_uploads_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".psycommux")
+        .join("uploads")
+}
+
+pub const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
+const UPLOAD_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// A file name safe to paste into a prompt or a shell: ASCII letters, digits,
+/// `.`, `-` and `_`, with an extension from the content type when it has none.
+pub fn upload_name(name: &str, content_type: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let mut clean = String::new();
+    for c in base.chars() {
+        let c = if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            c
+        } else {
+            '-'
+        };
+        if !(c == '-' && clean.ends_with('-')) {
+            clean.push(c);
+        }
+    }
+    let clean = clean.trim_matches(|c| c == '-' || c == '.');
+    let (stem, ext) = match clean.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() && ext.len() <= 8 => {
+            (stem, Some(ext))
+        }
+        _ => (clean, None),
+    };
+    let from_type = match content_type.split(';').next().unwrap_or("").trim() {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/heic" => Some("heic"),
+        "application/pdf" => Some("pdf"),
+        "text/plain" => Some("txt"),
+        _ => None,
+    };
+    let stem: String = stem.chars().take(60).collect();
+    let stem = if stem.is_empty() {
+        "file".to_string()
+    } else {
+        stem
+    };
+    match ext.or(from_type) {
+        Some(ext) => format!("{stem}.{}", ext.to_ascii_lowercase()),
+        None => stem,
+    }
+}
+
+/// Keep a file sent from the phone under `state.uploads` (0700 directory,
+/// 0600 file, a random prefix so names never collide) and answer its path.
+/// Files older than a week are removed on the way.
+async fn upload(state: &AppState, headers: &HeaderMap, body: Body) -> Result<String> {
+    let header_text = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    let length: usize = header_text("content-length").parse().unwrap_or(0);
+    if length > MAX_UPLOAD_BYTES {
+        return Err(CmuxError::new("too_large", "files are limited to 50 MB"));
+    }
+    let raw_name = header_text("x-filename");
+    // encodeURIComponent output: form decoding reads it back exactly.
+    let name: String = url::form_urlencoded::parse(raw_name.as_bytes())
+        .map(|(k, v)| {
+            if v.is_empty() {
+                k
+            } else {
+                format!("{k}={v}").into()
+            }
+        })
+        .collect();
+    let name = upload_name(&name, &header_text("content-type"));
+    let bytes = axum::body::to_bytes(body, MAX_UPLOAD_BYTES)
+        .await
+        .map_err(|_| CmuxError::new("too_large", "files are limited to 50 MB"))?;
+    if bytes.is_empty() {
+        return Err(CmuxError::new("bad_request", "the file is empty"));
+    }
+    let dir = state.uploads.clone();
+    let path = dir.join(format!("{}-{name}", &crate::net::new_token()[..8]));
+    let written = path.clone();
+    blocking(move || {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        std::fs::create_dir_all(&dir)?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let old = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > UPLOAD_MAX_AGE);
+                if old {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&written)?;
+        file.write_all(&bytes)
+    })
+    .await?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 fn error_response(e: &CmuxError) -> Response<Body> {

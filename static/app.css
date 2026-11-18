@@ -104,6 +104,7 @@ button.icon:hover { color: var(--fg); }
 /* ---- composer ---- */
 #composer { flex: none; padding: 6px 12px 10px; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
 #composer[hidden] { display: none; }
+body.kb #composer { padding-bottom: 6px; }
 #composer .box { display: flex; align-items: flex-end; gap: 8px; max-width: 800px; margin: 0 auto; background: var(--panel); border: 1px solid #45443f; border-radius: 22px; padding: 6px 6px 6px 16px; }
 #composer .box:focus-within { border-color: #5d5c56; }
 #input { flex: 1; min-width: 0; background: none; border: 0; color: var(--fg); font: 16px/1.45 ui-sans-serif, -apple-system, system-ui; resize: none; padding: 6px 0; max-height: 9.5em; outline: none; }
@@ -112,6 +113,11 @@ body.term-mode #input { font-family: ui-monospace, SFMono-Regular, Menlo, monosp
 .send:disabled { background: #4a4945; color: #8a8984; }
 .mic { width: 36px; height: 36px; border-radius: 50%; padding: 0; background: none; border: 0; color: var(--mute); flex: none; display: grid; place-items: center; position: relative; }
 .mic[hidden] { display: none; }
+.attach { width: 36px; height: 36px; border-radius: 50%; padding: 0; background: none; border: 0; color: var(--mute); flex: none; display: grid; place-items: center; margin-left: -10px; }
+.attach[hidden] { display: none; }
+.attach svg { width: 20px; height: 20px; }
+.attach.busy svg { animation: spin 1s linear infinite; }
+#composer.dropping .box { border-color: var(--acc); }
 .mic svg { width: 20px; height: 20px; }
 .mic.on { background: var(--err); color: #fff; }
 .mic.on svg { display: none; }

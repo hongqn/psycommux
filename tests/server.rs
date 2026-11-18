@@ -1579,3 +1579,110 @@ async fn service_worker_is_served_without_login() {
     assert!(resp.header("content-type").unwrap().contains("javascript"));
     assert!(resp.text().contains("showNotification"));
 }
+
+// -- files sent from the phone -------------------------------------------------
+
+async fn upload(
+    h: &Harness,
+    name: &str,
+    content_type: &str,
+    data: &[u8],
+    origin: Option<&str>,
+) -> Reply {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/api/upload")
+        .header("host", "127.0.0.1:8787")
+        .header("cookie", format!("{COOKIE_NAME}={TOKEN}"))
+        .header("content-type", content_type)
+        .header("x-filename", name);
+    if let Some(origin) = origin {
+        req = req.header("origin", origin);
+    }
+    let resp = h.send(req.body(Body::from(data.to_vec())).unwrap()).await;
+    let status = resp.status().as_u16();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    Reply {
+        status,
+        headers: Default::default(),
+        body,
+    }
+}
+
+#[tokio::test]
+async fn files_from_the_phone_are_kept_for_agents() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = Harness::new().await;
+    // encodeURIComponent("Screen Shot 2026-11-18 at 10.02.png")
+    let r = upload(
+        &h,
+        "Screen%20Shot%202026-11-18%20at%2010.02.png",
+        "image/png",
+        b"\x89PNG data",
+        None,
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let path = std::path::PathBuf::from(r.json()["path"].as_str().unwrap());
+    let dir = h.tmp.path().join("uploads");
+    assert_eq!(path.parent().unwrap(), dir);
+    let file_name = path.file_name().unwrap().to_str().unwrap();
+    assert!(
+        file_name.ends_with("-Screen-Shot-2026-11-18-at-10.02.png"),
+        "{file_name}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG data");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+
+    // A pasted image has no useful name; the type gives the extension.
+    let r = upload(&h, "", "image/jpeg", b"jpeg", None).await;
+    assert!(r.json()["path"].as_str().unwrap().ends_with("-file.jpg"));
+
+    // Same name twice: two files.
+    let a = upload(&h, "a.txt", "text/plain", b"1", None).await.json();
+    let b = upload(&h, "a.txt", "text/plain", b"2", None).await.json();
+    assert_ne!(a["path"], b["path"]);
+
+    assert_eq!(
+        upload(&h, "x.png", "image/png", b"", None).await.status,
+        400
+    );
+    assert_eq!(
+        upload(&h, "x.png", "image/png", b"x", Some("https://evil.example"))
+            .await
+            .status,
+        403
+    );
+    let anonymous = h
+        .send(
+            Request::builder()
+                .method("POST")
+                .uri("/api/upload")
+                .header("host", "127.0.0.1:8787")
+                .body(Body::from("x"))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(anonymous.status().as_u16(), 401);
+}
+
+#[test]
+fn upload_names_are_safe_to_paste() {
+    use psycommux::web::upload_name;
+    assert_eq!(upload_name("../../etc/passwd", ""), "passwd");
+    assert_eq!(upload_name("截图 1.PNG", "image/png"), "1.png");
+    assert_eq!(upload_name("notes", "application/pdf"), "notes.pdf");
+    assert_eq!(upload_name("a b;rm -rf $HOME.sh", ""), "a-b-rm-rf-HOME.sh");
+    assert_eq!(upload_name(".hidden", ""), "hidden");
+    assert_eq!(upload_name("", "application/octet-stream"), "file");
+}

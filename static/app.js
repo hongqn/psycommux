@@ -1293,6 +1293,7 @@ function updateComposer(view, surface) {
   send.classList.toggle("stop", !!stop);
   send.textContent = stop ? "■" : "↑";
   send.title = stop ? "Stop Claude" : "Send";
+  $("attachBtn").hidden = !(mode === "chat" || mode === "terminal" || mode === "new");
   if (mode === composerMode) return;
   stopDictation(true);
   composerMode = mode;
@@ -1316,6 +1317,7 @@ function updateComposer(view, surface) {
 }
 
 async function submit() {
+  if (uploading) return;
   stopDictation(true);
   const input = $("input");
   const text = input.value;
@@ -1359,6 +1361,73 @@ $("input").addEventListener("keydown", (e) => {
   e.preventDefault();
   submit();
 });
+// ---- attachments ---------------------------------------------------------------------------
+// A photo, screenshot or file goes to the Mac (~/.psycommux/uploads) and its
+// path lands in the message, where Claude can read it.
+let uploading = 0;
+function insertText(text) {
+  const input = $("input");
+  const at = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? at;
+  const before = input.value.slice(0, at);
+  const pad = before && !/\s$/.test(before) ? " " : "";
+  input.value = before + pad + text + " " + input.value.slice(end);
+  const caret = (before + pad + text + " ").length;
+  input.setSelectionRange(caret, caret);
+  growInput();
+}
+async function uploadFile(file) {
+  const res = await fetch("/api/upload", {
+    method: "POST",
+    headers: { "Content-Type": file.type || "application/octet-stream", "X-Filename": encodeURIComponent(file.name || "") },
+    body: file,
+  });
+  if (res.status === 401) { location.href = "/"; throw new Error("unauthorized"); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.message || data.error || res.statusText);
+  return data.path;
+}
+async function attach(files) {
+  const list = [...files].filter((f) => f.size > 0);
+  if (!list.length) return;
+  const btn = $("attachBtn");
+  uploading++;
+  btn.classList.add("busy");
+  $("sendBtn").disabled = true;
+  try {
+    for (const file of list) {
+      try { insertText(await uploadFile(file)); }
+      catch (e) { alert(`Could not send ${file.name || "the file"}: ${e.message}`); }
+    }
+  } finally {
+    if (--uploading === 0) { btn.classList.remove("busy"); $("sendBtn").disabled = false; }
+  }
+}
+$("attachBtn").addEventListener("pointerdown", (e) => { if (document.activeElement === $("input")) e.preventDefault(); });
+$("attachBtn").onclick = () => $("attachFile").click();
+$("attachFile").onchange = () => { const files = [...$("attachFile").files]; $("attachFile").value = ""; attach(files); };
+$("input").addEventListener("paste", (e) => {
+  if ($("attachBtn").hidden) return;
+  const files = [...(e.clipboardData?.files || [])];
+  if (!files.length) return;
+  e.preventDefault();
+  attach(files);
+});
+for (const type of ["dragenter", "dragover"]) {
+  $("composer").addEventListener(type, (e) => {
+    if ($("attachBtn").hidden || !e.dataTransfer?.types.includes("Files")) return;
+    e.preventDefault();
+    $("composer").classList.add("dropping");
+  });
+}
+$("composer").addEventListener("dragleave", () => $("composer").classList.remove("dropping"));
+$("composer").addEventListener("drop", (e) => {
+  $("composer").classList.remove("dropping");
+  if ($("attachBtn").hidden || !e.dataTransfer?.files.length) return;
+  e.preventDefault();
+  attach(e.dataTransfer.files);
+});
+
 $("sendBtn").addEventListener("pointerdown", (e) => { if (document.activeElement === $("input")) e.preventDefault(); });
 $("sendBtn").onclick = submit;
 
@@ -1627,6 +1696,8 @@ PHONE.addEventListener("change", () => { composerMode = ""; state.mounted = ""; 
 if (window.visualViewport) {
   const fitViewport = () => {
     document.documentElement.style.setProperty("--vvh", visualViewport.height + "px");
+    // The keyboard covers the home indicator: no safe-area gap above it.
+    document.body.classList.toggle("kb", window.innerHeight - visualViewport.height > 120);
     if (visualViewport.offsetTop) window.scrollTo(0, 0);
     document.querySelectorAll("#view pre.term, #view .chat-scroll").forEach(restoreScroll);
   };

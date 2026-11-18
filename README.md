@@ -44,6 +44,10 @@ swarm of remote funnels: here, one phone steering many coding agents.
   the browser has no speech recognition, and on iPhone and iPad, where WebKit
   hears only the first dictation after the page loads (WebKit bugs 317741 and
   321436); use the keyboard's own dictation key there.
+- **Photos and files for Claude**: the composer's + button (or pasting an
+  image, or dropping a file on a computer) sends photos, screenshots and files
+  to the Mac, into `~/.psycommux/uploads`, and puts each file's path in the
+  message for Claude to read. Files there are removed after a week.
 - **Secrets for agents**: when an agent needs a password or token it cannot
   get itself (1Password asking for Touch ID on the Mac while you are away), it
   runs `psycommux secret`; the phone shows the request, and the value you
@@ -178,6 +182,7 @@ phone ──HTTP/SSE──▶ psycommux ──unix socket──▶ cmux.app
 | `POST /api/send`, `/api/key`, `/api/peek` | `surface.send_text`, `surface.send_key`, `surface.read_text` |
 | `POST /api/chat/{history,poll,send,interrupt} {session_id}` | The session's transcript, read backwards in pages and forward from a byte offset; `mobile.chat.send` / `mobile.chat.interrupt` |
 | `POST /api/browser/{shot,act,release}` | `browser.screenshot` (answered as WebP bytes, or 204 when unchanged), `browser.viewport.set`, `browser.eval` (taps, scrolls, typing, reader view), `browser.press`, `browser.navigate` |
+| `POST /api/upload` (the file as the body, its name in `X-Filename`) | Saved as `~/.psycommux/uploads/<random>-<name>` (0600); answers `{path}` |
 | `POST /api/file {surface_id}` | The file a Markdown or file-preview panel shows |
 | `POST /api/session/new {cwd, prompt?}` | `workspace.create` with `initial_input: "claude '<prompt>'\n"` |
 | `POST /api/workspace/{select,create}` | `workspace.select`, `workspace.create` |
@@ -215,8 +220,8 @@ curl -H "Authorization: Bearer $PSYCOMMUX_TOKEN" http://127.0.0.1:8787/api/tree
 - The cookie is `HttpOnly; SameSite=Lax` (`Secure` over HTTPS). Not
   `Strict`: an iOS Home Screen app launched cold opens the page as if from
   another site, and would ask for the token every time. State-changing
-  requests must be JSON POSTs from the same origin, or carry no `Origin`, as
-  from curl.
+  requests must be JSON POSTs (or file uploads) from the same origin, or
+  carry no `Origin`, as from curl.
 - The token never appears in the log.
 - Transcript paths stay on the server; the page names sessions by the ids cmux
   reports.
