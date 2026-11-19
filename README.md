@@ -75,9 +75,13 @@ One self-contained binary: the page, script and styles are compiled in.
 
 ## Install
 
+Needs Rust 1.88 or newer.
+
 ```bash
-cargo install --path .
+cargo install --git https://github.com/hongqn/psycommux
 ```
+
+Or from a checkout: `cargo install --path .`
 
 ## Run
 
@@ -263,9 +267,6 @@ cargo test
 The tests run psycommux against a fake cmux socket, so they need neither cmux
 nor a network. The TLS tests make a throwaway certificate with `openssl` and
 call `curl`.
-
-psycommux began as the `examples/cmux-web-remote` prototype in the cmux
-repository, written in Python.
 
 ## License
 

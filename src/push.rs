@@ -341,14 +341,13 @@ pub async fn mac_unattended() -> bool {
             .unwrap_or_default()
     };
     let root = run(&["-n", "Root", "-d1", "-a"]).await;
-    if let Some(at) = root.find("<key>CGSSessionScreenIsLocked</key>") {
-        if root[at..]
+    if let Some(at) = root.find("<key>CGSSessionScreenIsLocked</key>")
+        && root[at..]
             .trim_start_matches("<key>CGSSessionScreenIsLocked</key>")
             .trim_start()
             .starts_with("<true/>")
-        {
-            return true;
-        }
+    {
+        return true;
     }
     let hid = run(&["-c", "IOHIDSystem", "-d", "4"]).await;
     hid.lines()

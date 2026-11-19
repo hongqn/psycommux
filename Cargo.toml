@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "Drive cmux from your phone: a small server and an installable web app"
 license = "MIT"
+repository = "https://github.com/hongqn/psycommux"
+rust-version = "1.88"
+readme = "README.md"
+keywords = ["cmux", "terminal", "remote", "pwa", "claude"]
+categories = ["command-line-utilities", "web-programming::http-server"]
 
 [dependencies]
 aes-gcm = "0.10"

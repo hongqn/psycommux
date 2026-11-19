@@ -81,10 +81,10 @@ pub fn parse_sidebar_state<S: AsRef<str>>(lines: &[S]) -> Value {
                     priority,
                     json!({"key": key, "markdown": markdown.replace("\\n", "\n"), "priority": priority}),
                 ));
-            } else if section == "log" {
-                if let Some(caps) = log_re.captures(item) {
-                    log = json!({"level": &caps[1], "message": &caps[2]});
-                }
+            } else if section == "log"
+                && let Some(caps) = log_re.captures(item)
+            {
+                log = json!({"level": &caps[1], "message": &caps[2]});
             }
             continue;
         }

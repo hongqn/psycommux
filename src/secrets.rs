@@ -202,13 +202,12 @@ impl SecretRequests {
             if n.get("title").map(value_text).as_deref() == Some("Secret requested")
                 && n.get("subtitle").map(value_text).as_deref() == Some(label)
                 && n.get("body") == Some(body)
+                && let Some(id) = n.get("id")
             {
-                if let Some(id) = n.get("id") {
-                    let _ = self
-                        .client
-                        .call("notification.dismiss", json!({"id": id}))
-                        .await;
-                }
+                let _ = self
+                    .client
+                    .call("notification.dismiss", json!({"id": id}))
+                    .await;
             }
         }
     }

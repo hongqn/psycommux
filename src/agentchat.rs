@@ -146,73 +146,74 @@ fn tool_items(block: &Value, base: &Item) -> Vec<Item> {
     };
     let mut item = with(base, json!({"kind": "tool", "id": id, "tool": name}));
 
-    if name == "Bash" {
-        if let Some(command) = s(inp, "command") {
-            item.insert("summary".into(), json!(one_line(command, SUMMARY_LIMIT)));
-            item.insert("command".into(), json!(cut(command, DETAIL_LIMIT)));
-            if let Some(desc) = inp
-                .get("description")
-                .filter(|d| !d.is_null() && d.as_str() != Some(""))
-            {
-                let desc = desc
-                    .as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| desc.to_string());
-                item.insert("note".into(), json!(one_line(&desc, SUMMARY_LIMIT)));
-            }
-            return vec![item];
+    if name == "Bash"
+        && let Some(command) = s(inp, "command")
+    {
+        item.insert("summary".into(), json!(one_line(command, SUMMARY_LIMIT)));
+        item.insert("command".into(), json!(cut(command, DETAIL_LIMIT)));
+        if let Some(desc) = inp
+            .get("description")
+            .filter(|d| !d.is_null() && d.as_str() != Some(""))
+        {
+            let desc = desc
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| desc.to_string());
+            item.insert("note".into(), json!(one_line(&desc, SUMMARY_LIMIT)));
         }
+        return vec![item];
     }
-    if name == "Write" || EDIT_TOOLS.contains(&name) {
-        if let Some(path) = nonempty(inp, "file_path").or_else(|| nonempty(inp, "notebook_path")) {
-            let (text, adds, dels) = if name == "Write" {
-                diff("", s(inp, "content").unwrap_or(""))
-            } else if name == "MultiEdit" {
-                let parts: Vec<(String, usize, usize)> = inp
-                    .get("edits")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .map(|e| {
-                        diff(
-                            s(e, "old_string").unwrap_or(""),
-                            s(e, "new_string").unwrap_or(""),
-                        )
-                    })
-                    .collect();
-                let text = parts
-                    .iter()
-                    .map(|p| p.0.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n…\n");
-                (
-                    text,
-                    parts.iter().map(|p| p.1).sum(),
-                    parts.iter().map(|p| p.2).sum(),
-                )
-            } else {
-                let new = nonempty(inp, "new_string")
-                    .or_else(|| nonempty(inp, "new_source"))
-                    .unwrap_or("");
-                diff(s(inp, "old_string").unwrap_or(""), new)
-            };
-            item.extend(
+    if (name == "Write" || EDIT_TOOLS.contains(&name))
+        && let Some(path) = nonempty(inp, "file_path").or_else(|| nonempty(inp, "notebook_path"))
+    {
+        let (text, adds, dels) = if name == "Write" {
+            diff("", s(inp, "content").unwrap_or(""))
+        } else if name == "MultiEdit" {
+            let parts: Vec<(String, usize, usize)> = inp
+                .get("edits")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|e| {
+                    diff(
+                        s(e, "old_string").unwrap_or(""),
+                        s(e, "new_string").unwrap_or(""),
+                    )
+                })
+                .collect();
+            let text = parts
+                .iter()
+                .map(|p| p.0.as_str())
+                .collect::<Vec<_>>()
+                .join("\n…\n");
+            (
+                text,
+                parts.iter().map(|p| p.1).sum(),
+                parts.iter().map(|p| p.2).sum(),
+            )
+        } else {
+            let new = nonempty(inp, "new_string")
+                .or_else(|| nonempty(inp, "new_source"))
+                .unwrap_or("");
+            diff(s(inp, "old_string").unwrap_or(""), new)
+        };
+        item.extend(
                 json!({"summary": path, "path": path, "diff": cut(&text, DETAIL_LIMIT), "additions": adds, "deletions": dels})
                     .as_object()
                     .unwrap()
                     .clone(),
             );
-            return vec![item];
-        }
+        return vec![item];
     }
-    if name == "AskUserQuestion" {
-        if let Some(questions) = inp.get("questions").and_then(Value::as_array) {
-            let mut out = Vec::new();
-            for (i, q) in questions.iter().enumerate() {
-                let Some(prompt) = q.as_object().and(nonempty(q, "question")) else {
-                    continue;
-                };
-                let options: Vec<Value> = q
+    if name == "AskUserQuestion"
+        && let Some(questions) = inp.get("questions").and_then(Value::as_array)
+    {
+        let mut out = Vec::new();
+        for (i, q) in questions.iter().enumerate() {
+            let Some(prompt) = q.as_object().and(nonempty(q, "question")) else {
+                continue;
+            };
+            let options: Vec<Value> = q
                     .get("options")
                     .and_then(Value::as_array)
                     .into_iter()
@@ -220,41 +221,40 @@ fn tool_items(block: &Value, base: &Item) -> Vec<Item> {
                     .filter(|o| o.is_object())
                     .map(|o| json!({"label": s(o, "label").unwrap_or(""), "detail": s(o, "description").unwrap_or("")}))
                     .collect();
-                out.push(with(
-                    base,
-                    json!({
-                        "kind": "question", "id": format!("{call_id}#{i}"), "call_id": call_id,
-                        "prompt": prompt, "header": s(q, "header").unwrap_or(""),
-                        "multi": q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
-                        "options": options,
-                    }),
-                ));
-            }
-            if !out.is_empty() {
-                return out;
-            }
+            out.push(with(
+                base,
+                json!({
+                    "kind": "question", "id": format!("{call_id}#{i}"), "call_id": call_id,
+                    "prompt": prompt, "header": s(q, "header").unwrap_or(""),
+                    "multi": q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
+                    "options": options,
+                }),
+            ));
+        }
+        if !out.is_empty() {
+            return out;
         }
     }
-    if name == "TodoWrite" {
-        if let Some(todos) = inp.get("todos").and_then(Value::as_array) {
-            let todos: Vec<Value> = todos
-                .iter()
-                .filter(|t| t.is_object())
-                .map(|t| {
-                    let text = nonempty(t, "content")
-                        .or_else(|| nonempty(t, "activeForm"))
-                        .unwrap_or("");
-                    json!({"text": text, "status": s(t, "status").unwrap_or("")})
-                })
-                .collect();
-            let done = todos.iter().filter(|t| t["status"] == "completed").count();
-            item.insert(
-                "summary".into(),
-                json!(format!("{done}/{} done", todos.len())),
-            );
-            item.insert("todos".into(), json!(todos));
-            return vec![item];
-        }
+    if name == "TodoWrite"
+        && let Some(todos) = inp.get("todos").and_then(Value::as_array)
+    {
+        let todos: Vec<Value> = todos
+            .iter()
+            .filter(|t| t.is_object())
+            .map(|t| {
+                let text = nonempty(t, "content")
+                    .or_else(|| nonempty(t, "activeForm"))
+                    .unwrap_or("");
+                json!({"text": text, "status": s(t, "status").unwrap_or("")})
+            })
+            .collect();
+        let done = todos.iter().filter(|t| t["status"] == "completed").count();
+        item.insert(
+            "summary".into(),
+            json!(format!("{done}/{} done", todos.len())),
+        );
+        item.insert("todos".into(), json!(todos));
+        return vec![item];
     }
     let summary = SUMMARY_KEYS
         .iter()
@@ -290,10 +290,10 @@ fn user_text_items(text: &str, base: &Item) -> Vec<Item> {
     if trimmed.is_empty() {
         return vec![];
     }
-    if trimmed.starts_with("<command-") {
-        if let Some(command) = command_text(trimmed) {
-            return vec![with(base, json!({"kind": "user", "text": command}))];
-        }
+    if trimmed.starts_with("<command-")
+        && let Some(command) = command_text(trimmed)
+    {
+        return vec![with(base, json!({"kind": "user", "text": command}))];
     }
     if NOISE_PREFIXES.iter().any(|p| trimmed.starts_with(p)) {
         return vec![];
@@ -326,10 +326,10 @@ fn truthy(v: &Value, key: &str) -> bool {
 
 /// Display items for one transcript line (often none).
 pub fn parse_line(raw: &[u8]) -> Vec<Item> {
-    if let Some(caps) = LEADING_TYPE.captures(raw) {
-        if !matches!(&caps[1], b"user" | b"assistant" | b"system") {
-            return vec![];
-        }
+    if let Some(caps) = LEADING_TYPE.captures(raw)
+        && !matches!(&caps[1], b"user" | b"assistant" | b"system")
+    {
+        return vec![];
     }
     let Ok(d) = serde_json::from_slice::<Value>(raw) else {
         return vec![];
@@ -520,14 +520,13 @@ pub fn session_cwd(path: &Path) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
     for line in io::BufReader::new(file).lines().take(200) {
         let Ok(line) = line else { break };
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-            if let Some(cwd) = v
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
+            && let Some(cwd) = v
                 .get("cwd")
                 .and_then(|c| c.as_str())
                 .filter(|c| c.starts_with('/'))
-            {
-                return Some(cwd.to_string());
-            }
+        {
+            return Some(cwd.to_string());
         }
     }
     None

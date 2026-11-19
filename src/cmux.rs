@@ -495,10 +495,11 @@ impl CmuxClient {
             self.poll_screens(revisions, lines).await
         };
         for (surface_id, result) in results.iter_mut() {
-            if truthy(result, "changed") && result.get("error").is_none() {
-                if let Some(grid) = self.read_grid(surface_id).await {
-                    result["grid"] = grid;
-                }
+            if truthy(result, "changed")
+                && result.get("error").is_none()
+                && let Some(grid) = self.read_grid(surface_id).await
+            {
+                result["grid"] = grid;
             }
         }
         Ok(results)

@@ -26,10 +26,13 @@ pub fn default_session_glob() -> String {
     format!("{home}/Library/Application Support/cmux/session-com.cmuxterm.app*.json")
 }
 
+/// The session file last read (path and mtime), and the surface id -> path map it gave.
+type FileCache = (Option<(PathBuf, SystemTime)>, HashMap<String, String>);
+
 /// surface id -> file path for Markdown and file-preview panels, from cmux's saved session.
 pub struct SessionFiles {
     pattern: String,
-    cache: Mutex<(Option<(PathBuf, SystemTime)>, HashMap<String, String>)>,
+    cache: Mutex<FileCache>,
 }
 
 impl SessionFiles {

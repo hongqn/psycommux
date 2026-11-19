@@ -152,8 +152,11 @@ impl BrowserViewports {
 pub struct AgentSessions {
     client: Arc<CmuxClient>,
     max_age: Duration,
-    cache: tokio::sync::Mutex<(Option<Instant>, Arc<HashMap<String, Value>>)>,
+    cache: tokio::sync::Mutex<SessionCache>,
 }
+
+/// When the sessions were last fetched, and the records by session id.
+type SessionCache = (Option<Instant>, Arc<HashMap<String, Value>>);
 
 fn state_of(record: &Value) -> String {
     agentchat::session_state(record.get("state").and_then(Value::as_str).unwrap_or(""))
@@ -610,10 +613,9 @@ fn authorized(state: &AppState, headers: &HeaderMap) -> bool {
     if let Some(auth) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
+        && let Some(bearer) = auth.strip_prefix("Bearer ")
     {
-        if let Some(bearer) = auth.strip_prefix("Bearer ") {
-            presented = Some(bearer.trim().to_string());
-        }
+        presented = Some(bearer.trim().to_string());
     }
     presented
         .is_some_and(|p| !p.is_empty() && constant_time_eq(p.as_bytes(), state.token.as_bytes()))
