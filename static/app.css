@@ -241,6 +241,12 @@ pre.diff .add { color: #7ee787; } pre.diff .del { color: #ff7b72; }
 .question .qo { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 .question .qo button { text-align: left; display: flex; flex-direction: column; gap: 2px; padding: .55em .8em; border-radius: 11px; background: var(--panel); }
 .question .qo span { font-size: 12.5px; color: var(--mute); }
+.question.multi .qo button b::before { content: "☐ "; color: var(--mute); }
+.question.multi .qo button.on b::before { content: "☑ "; color: var(--acc); }
+.question .qo button.on { box-shadow: inset 0 0 0 1px var(--acc); }
+.question .qsubmit { display: block; margin: 10px 0 0 auto; padding: .5em 1em; border-radius: 11px; background: var(--acc); color: #1a1a1a; font-weight: 600; }
+.question .qsubmit:disabled { opacity: .45; }
+.question.answered .qsubmit { display: none; }
 .question.answered .qo { display: none; } .question .answer { font-size: 13.5px; color: #9fd09f; margin-top: 6px; }
 .question .answer:empty { display: none; }
 .chat-status { flex: none; display: flex; align-items: center; gap: .6em; padding: 0 18px; font-size: 13px; color: var(--mute); max-width: 816px; width: 100%; margin: 0 auto; }

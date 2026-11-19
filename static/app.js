@@ -2029,7 +2029,9 @@ function applyResult(chat, result) {
   for (const card of chat.questions[result.call_id] || []) {
     card.classList.add("answered");
     const ans = card.querySelector(".answer");
-    ans.textContent = result.text.replace(/^User has answered[^:]*:\s*/i, "").slice(0, 400);
+    // "…answered: "question"="answer", …": show each card its own answer.
+    const pairs = Object.fromEntries([...result.text.matchAll(/"((?:[^"\\]|\\.)*)"="((?:[^"\\]|\\.)*)"/g)].map((m) => [m[1], m[2]]));
+    ans.textContent = pairs[card.prompt] ?? result.text.replace(/^(?:User has answered|Your questions have been answered)[^:]*:\s*/i, "").slice(0, 400);
   }
 }
 
@@ -2050,17 +2052,21 @@ function itemNode(chat, item) {
   if (item.kind === "assistant") return el("div", { className: "msg bot", innerHTML: md(item.text) });
   if (item.kind === "note") return el("div", { className: "msg note", textContent: item.text });
   if (item.kind === "question") {
-    const card = el("div", { className: "msg question" },
-      el("div", { className: "qh", textContent: item.header || "Question" }),
+    const card = el("div", { className: "msg question" + (item.multi ? " multi" : "") },
+      el("div", { className: "qh", textContent: (item.header || "Question") + (item.multi ? " · choose any" : "") }),
       el("div", { className: "qp", innerHTML: md(item.prompt) }));
     const opts = el("div", { className: "qo" });
+    const group = (chat.questions[item.call_id] = chat.questions[item.call_id] || []);
+    card.multi = !!item.multi;
+    card.prompt = item.prompt;
+    card.picked = new Set();
     item.options.forEach((o, i) => {
       const b = el("button", {}, el("b", { textContent: `${i + 1}. ${o.label}` }), o.detail ? el("span", { textContent: o.detail }) : null);
-      b.onclick = () => answer(chat, i);
+      b.onclick = () => pick(chat, group, card, i);
       opts.append(b);
     });
     card.append(opts, el("div", { className: "answer" }));
-    (chat.questions[item.call_id] = chat.questions[item.call_id] || []).push(card);
+    group.push(card);
     return card;
   }
   return null;
@@ -2215,6 +2221,10 @@ function renderPrompt(chat) {
   const send = (text) => chat.surfaceId && api("/api/send", { surface_id: chat.surfaceId, text, enter: false }).then(() => refreshPeek(chat)).catch(failed);
   const esc = () => chat.surfaceId && api("/api/key", { surface_id: chat.surfaceId, key: "escape" }).then(() => refreshPeek(chat)).catch(failed);
   const term = () => { state.viewBySurface[chat.surfaceId] = "terminal"; save("cmuxViews", state.viewBySurface); renderMain(); };
+  if (chat.msgs.querySelector(".msg.question:not(.answered)")) {
+    st.append(el("div", { className: "ptitle", textContent: "Answer the question above." }));
+    return;
+  }
   const p = parsePrompt(chat.peek || "");
   const foot = el("div", { className: "pfoot" }, el("button", { textContent: "Esc", title: "Cancel", onclick: esc }));
   if (!p) {
@@ -2242,9 +2252,49 @@ function renderPrompt(chat) {
   st.append(opts, foot);
 }
 
-function answer(chat, index) {
-  if (!chat.surfaceId) return;
-  api("/api/send", { surface_id: chat.surfaceId, text: String(index + 1), enter: false }).then(() => refreshPeek(chat)).catch(() => {});
+// One single-choice question: a number answers it. Several questions, or any
+// multiple-choice one, are picked here first, then sent the way the terminal
+// takes them: a number per pick (a single-choice one moves on by itself), → to
+// leave a multiple-choice one, and 1 on the review screen to submit.
+function pick(chat, group, card, index) {
+  if (!chat.surfaceId || card.classList.contains("answered") || group.sending) return;
+  if (group.length === 1 && !card.multi) {
+    api("/api/send", { surface_id: chat.surfaceId, text: String(index + 1), enter: false }).then(() => refreshPeek(chat)).catch(failed);
+    return;
+  }
+  if (card.multi) card.picked.has(index) ? card.picked.delete(index) : card.picked.add(index);
+  else card.picked = new Set([index]);
+  card.querySelectorAll(".qo button").forEach((b, i) => b.classList.toggle("on", card.picked.has(i)));
+  const last = group[group.length - 1];
+  let submit = last.querySelector(".qsubmit");
+  if (!submit) {
+    submit = el("button", { className: "qsubmit", textContent: "Submit answers" });
+    submit.onclick = () => submitAnswers(chat, group, submit);
+    last.querySelector(".qo").after(submit);
+  }
+  submit.disabled = group.some((c) => !c.multi && !c.picked.size);
+}
+
+async function submitAnswers(chat, group, button) {
+  group.sending = true;
+  button.disabled = true;
+  button.textContent = "Sending…";
+  const send = (text) => api("/api/send", { surface_id: chat.surfaceId, text, enter: false });
+  const key = (k) => api("/api/key", { surface_id: chat.surfaceId, key: k });
+  try {
+    for (const card of group) {
+      for (const i of [...card.picked].sort((a, b) => a - b)) { await send(String(i + 1)); await sleep(150); }
+      if (card.multi) { await key("right"); await sleep(150); }
+    }
+    await send("1");
+    button.textContent = "Sent";
+  } catch (e) {
+    failed(e);
+    button.textContent = "Submit answers";
+    button.disabled = false;
+  }
+  group.sending = false;
+  refreshPeek(chat);
 }
 
 async function chatLoop(poll, sid) {

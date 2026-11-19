@@ -40,8 +40,10 @@ swarm of remote funnels: here, one phone steering many coding agents.
   runs `claude --resume <id>` in its terminal from the folder it ran in.
 - **Claude Code sessions** open as a chat read from the session's transcript:
   your messages as bubbles, replies as Markdown, tool calls folded into steps
-  with diffs and output, AskUserQuestion as tappable options, and permission
-  prompts with 1/2/3/Esc. The composer sends a prompt; while Claude works its
+  with diffs and output, AskUserQuestion as tappable options (multiple-choice
+  questions and several questions at once are ticked on the cards and sent
+  with Submit answers), and permission prompts as the question with Claude's
+  own labelled choices. The composer sends a prompt; while Claude works its
   button stops it. A Terminal switch shows the raw screen.
 - **Terminals** live and in color, with keys (Enter, Esc, Ctrl-C, Tab, ⇧Tab,
   arrows, Ctrl-D, PgUp/PgDn).
