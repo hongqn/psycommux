@@ -7,6 +7,15 @@ works like the Claude app, with cmux's workspaces as the organizing layer.
 The name comes from Gundam's psycommu, the system a Newtype uses to steer a
 swarm of remote funnels: here, one phone steering many coding agents.
 
+![The workspace drawer, a Claude Code session waiting for approval, and the same session after it finished](docs/screenshots.png)
+
+<details>
+<summary>A terminal and a browser panel in reader mode</summary>
+
+![A terminal running a dev server, and a documentation page in reader mode](docs/screenshots-more.png)
+
+</details>
+
 - **Drawer**: cmux's workspaces, each expandable to what it holds: Claude
   Code sessions (✳), terminals (›_), browsers (◍), Markdown documents (¶) and
   file previews (▤). Each row shows what the Mac's sidebar shows, in its

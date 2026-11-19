@@ -7,6 +7,8 @@
   --nav-w: 288px;
 }
 * { box-sizing: border-box; }
+/* Class rules that set display would otherwise show elements marked hidden. */
+[hidden] { display: none !important; }
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body {
   margin: 0; background: var(--bg); color: var(--fg); height: var(--vvh, 100dvh); overflow: hidden;
