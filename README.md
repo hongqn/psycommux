@@ -270,4 +270,5 @@ call `curl`.
 
 ## License
 
-MIT. See [LICENSE](LICENSE), which also carries the terms of the Lucide icons.
+MIT. See [LICENSE](LICENSE). The Lucide icons are under their own terms, in
+[LICENSE-LUCIDE](LICENSE-LUCIDE).

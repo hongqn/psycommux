@@ -281,7 +281,7 @@ const SIDEBAR_DEFAULTS = {
 function sidebarOptions() {
   return Object.assign({}, SIDEBAR_DEFAULTS, (state.tree && state.tree.sidebar_settings) || {});
 }
-// Status icons: SF Symbol names cmux sends, drawn with Lucide (ISC, see LICENSE).
+// Status icons: SF Symbol names cmux sends, drawn with Lucide (ISC, see LICENSE-LUCIDE).
 const SF_TO_LUCIDE = {
   "checkmark": "check",
   "checkmark.circle": "circle-check",
