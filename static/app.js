@@ -2124,19 +2124,9 @@ function setChatState(chat, value) {
     st.append(el("span", { className: "spin" }), el("span", { textContent: "Claude is working…" }), stop);
   } else if (value === "needs_input") {
     // Permission prompts are drawn in the terminal and reach the transcript only
-    // once answered, so show the bottom of the screen with number keys.
-    const keys = el("div", { className: "peek-keys" });
-    for (const n of ["1", "2", "3"]) {
-      const b = el("button", { textContent: n });
-      b.onclick = () => chat.surfaceId && api("/api/send", { surface_id: chat.surfaceId, text: n, enter: false }).then(() => refreshPeek(chat));
-      keys.append(b);
-    }
-    const escB = el("button", { textContent: "Esc" });
-    escB.onclick = () => chat.surfaceId && api("/api/key", { surface_id: chat.surfaceId, key: "escape" }).then(() => refreshPeek(chat));
-    const term = el("button", { textContent: "Terminal" });
-    term.onclick = () => { state.viewBySurface[chat.surfaceId] = "terminal"; save("cmuxViews", state.viewBySurface); renderMain(); };
-    keys.append(escB, term);
-    st.append(el("div", { className: "peek-head", textContent: "Claude needs your input" }), el("pre", { className: "peek", textContent: chat.peek }), keys);
+    // once answered, so read them off the screen.
+    st.append(el("div", { className: "qh", textContent: "Claude needs your input" }));
+    renderPrompt(chat);
     refreshPeek(chat);
   } else if (value === "ended") {
     // `claude --resume <id>` in the same terminal, from the session's folder.
@@ -2161,11 +2151,95 @@ async function refreshPeek(chat) {
   if (!chat.surfaceId) return;
   try {
     const r = await api("/api/peek", { surface_id: chat.surfaceId });
-    const lines = (r.text || "").replace(/\s+$/, "").split("\n");
-    chat.peek = lines.slice(-14).join("\n");
-    const pre = chat.status.querySelector(".peek");
-    if (pre) pre.textContent = chat.peek;
+    const text = (r.text || "").replace(/\s+$/, "");
+    if (text === chat.peek) return;
+    chat.peek = text;
+    if (chat.state === "needs_input") renderPrompt(chat);
   } catch (e) { /* keep the last one */ }
+}
+
+// Claude Code's terminal prompt, e.g.
+//   │ python -m pytest -q          <- what it wants to run or change
+//   ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+//    This command requires approval   <- title
+//    Do you want to proceed?          <- question
+//    ❯ 1. Yes
+//      2. Yes, and don't ask again for …
+//    Esc to cancel · Tab to amend
+// Returns null when the screen does not end in a numbered menu.
+function parsePrompt(text) {
+  const raw = text.split("\n").map((l) => l.replace(/\s+$/, ""));
+  // A │ bar marks a command drawn as a block; older versions also draw the whole
+  // prompt in a box, whose sides go and whose top and bottom act as rules.
+  const barred = raw.map((l) => /^\s*│/.test(l));
+  const lines = raw.map((l) => l.replace(/^\s*│ ?/, "").replace(/\s*│$/, ""));
+  const RULE = /^\s*(?:[─━╌┄-]{8,}|[╭╰].*)$/;
+  const OPT = /^\s*(?:[❯›>]\s*)?(\d+)\.\s+(.*)$/;
+  let last = -1;
+  for (let i = lines.length - 1; i >= 0; i--) if (OPT.test(lines[i])) { last = i; break; }
+  if (last < 0) return null;
+  let first = last;
+  while (first > 0 && (OPT.test(lines[first - 1]) || (/^\s{3,}\S/.test(lines[first - 1]) && !RULE.test(lines[first - 1])))) first--;
+  while (first <= last && !OPT.test(lines[first])) first++;
+  const options = [];
+  for (let i = first; i <= last; i++) {
+    const m = lines[i].match(OPT);
+    if (m) options.push({ key: m[1], label: m[2].trim() });
+    else if (options.length) options[options.length - 1].label += " " + lines[i].trim();
+  }
+  if (options.length < 2) return null;
+  // Text between the menu and the rule above it: the title and the question.
+  const head = [];
+  let i = first - 1;
+  for (; i >= 0 && !RULE.test(lines[i]); i--) if (lines[i].trim()) head.unshift(lines[i]);
+  if (!head.length) return null;
+  const question = head.pop().trim();
+  // Above the rule: what it wants to do, a │ block taken whole, else back to a blank line.
+  let context = [];
+  const block = i > 0 && barred[i - 1];
+  for (let j = i - 1; j >= 0 && context.length < 40 && !RULE.test(lines[j]); j--) {
+    if (block ? !barred[j] : context.length && !lines[j].trim()) break;
+    if (!context.length && !lines[j].trim()) continue;
+    context.unshift(lines[j]);
+  }
+  // In a box the rule is its top, so the command sits between the title and the question.
+  if (!context.length && head.length > 1) context = head.splice(1);
+  while (context.length && !context[0].trim()) context.shift();
+  const indent = Math.min(...context.filter((l) => l.trim()).map((l) => l.match(/^ */)[0].length));
+  return { title: head.map((l) => l.trim()).join(" "), question, options, context: context.map((l) => l.slice(indent)).join("\n") };
+}
+
+function renderPrompt(chat) {
+  const st = chat.status;
+  st.querySelectorAll(":scope > :not(.qh)").forEach((n) => n.remove());
+  const send = (text) => chat.surfaceId && api("/api/send", { surface_id: chat.surfaceId, text, enter: false }).then(() => refreshPeek(chat)).catch(failed);
+  const esc = () => chat.surfaceId && api("/api/key", { surface_id: chat.surfaceId, key: "escape" }).then(() => refreshPeek(chat)).catch(failed);
+  const term = () => { state.viewBySurface[chat.surfaceId] = "terminal"; save("cmuxViews", state.viewBySurface); renderMain(); };
+  const p = parsePrompt(chat.peek || "");
+  const foot = el("div", { className: "pfoot" }, el("button", { textContent: "Esc", title: "Cancel", onclick: esc }));
+  if (!p) {
+    foot.append(el("button", { textContent: "Terminal", onclick: term }));
+    // Unknown screen: show its bottom and the usual keys.
+    const keys = ["1", "2", "3"].map((n) => el("button", { textContent: n, onclick: () => send(n) }));
+    foot.prepend(...keys);
+    st.append(el("pre", { className: "peek", textContent: (chat.peek || "").split("\n").slice(-14).join("\n") }), foot);
+    return;
+  }
+  if (p.title) st.append(el("div", { className: "ptitle", textContent: p.title }));
+  if (p.context) {
+    // The command's last lines are what runs; long ones scroll from there.
+    const ctx = el("pre", { className: "pctx", textContent: p.context });
+    st.append(ctx);
+    requestAnimationFrame(() => { ctx.scrollTop = ctx.scrollHeight; });
+  }
+  st.append(el("div", { className: "pq", textContent: p.question }));
+  const opts = el("div", { className: "qo" });
+  for (const o of p.options) {
+    const b = el("button", { onclick: () => send(o.key) }, el("b", { textContent: o.key }), el("span", { textContent: o.label }));
+    if (/^no\b/i.test(o.label)) b.className = "no";
+    opts.append(b);
+  }
+  st.append(opts, foot);
 }
 
 function answer(chat, index) {
