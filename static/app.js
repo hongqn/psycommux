@@ -1113,6 +1113,11 @@ function readerNode(n) {
     img.src = src;
     return img;
   }
+  if (tag === "prop") {
+    const chip = el("span", { className: "prop" });
+    for (const k of kids) { const c = readerNode(k); if (c) chip.append(c); }
+    return chip;
+  }
   const name = READER_TAGS.has(tag) ? tag : "div";
   const node = document.createElement(name);
   if (name === "a" && attrs && /^https?:\/\//i.test(attrs.href || "")) node.href = attrs.href;

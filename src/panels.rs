@@ -232,7 +232,8 @@ pub fn type_script(text: &str) -> String {
 
 /// Reader mode: the page's main content as a small tree, for the phone to lay
 /// out as its own text. A node is a string (text) or `[tag, attrs, ...children]`
-/// with tags from a short list and attrs only `href` (http/https) or `src`/`alt`.
+/// with tags from a short list and attrs only `href` (http/https) or `src`/`alt`;
+/// `prop` is a field and its value, such as an issue's status.
 /// The phone builds elements from it and never parses the page's HTML, so
 /// nothing from the page runs on psycommux's origin. Reads computed styles,
 /// not layout, so it works on a panel the Mac is not showing.
@@ -283,6 +284,36 @@ pub const READ_SCRIPT: &str = r#"(() => {
     return layout.get(t);
   };
   const isBlock = (k) => Array.isArray(k) && BLOCK.has(k[0]);
+  // A row laid out with flex (an avatar, a name, "created", "· 3min ago") has blockified
+  // children; when it holds only short phrases it reads as one line, its boxes as spans.
+  const PROSE = new Set(['p','h1','h2','h3','h4','h5','h6','ul','ol','li','pre','table','blockquote','dl','figure','hr']);
+  const prose = (k) => Array.isArray(k) && (PROSE.has(k[0]) || (k[0] === 'img' && k[1].w > 64) || k.slice(2).some(prose));
+  const text = (k) => typeof k === 'string' ? k.length : Array.isArray(k) ? k.slice(2).reduce((n, c) => n + text(c), 0) : 0;
+  const inline = (k) => !Array.isArray(k) ? k : [k[0] === 'div' ? 'span' : k[0], k[1], ...spaced(k.slice(2).map(inline))];
+  const spaced = (kids) => {
+    const out = [];
+    for (const k of kids) {
+      const prev = out[out.length - 1];
+      if (prev !== undefined && !(typeof prev === 'string' && /\s$/.test(prev)) && !(typeof k === 'string' && /^\s/.test(k)) &&
+          (Array.isArray(prev) && prev[0] !== 'img' || Array.isArray(k) && k[0] !== 'img')) out.push(' ');
+      out.push(k);
+    }
+    return out;
+  };
+  const here = location.href.split('#')[0];
+  // A control that shows a value, named for screen readers as "Change status" (Linear,
+  // Jira, GitHub's sidebar): read as "Status Todo". Other buttons are actions and go.
+  const property = (el) => {
+    const m = (el.getAttribute('aria-label') || '').match(/^(?:change|set|edit|select)\s+([a-z][a-z ]{1,24}?)\s*(?:[.:]\s*(.*))?$/i);
+    if (!m) return null;
+    let value = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+    const said = (m[2] || '').match(/currently\s+(.+?)\s+(?:is|are)\b/i);
+    if (!value && said) value = said[1];
+    if (!value) value = [...el.querySelectorAll('img[alt]')].map((i) => i.alt.replace(/^avatar of\s+/i, '')).join(', ');
+    if (!value || /^no\b/i.test(m[2] || '') && !el.innerText.trim()) return null;
+    const name = m[1].trim();
+    return ['span', null, ' ', ['prop', null, ['small', null, name[0].toUpperCase() + name.slice(1)], ' ', ['b', null, value]], ' '];
+  };
   // Drop whitespace that only separates boxes; keep it between words.
   const tidy = (raw) => {
     const kids = [];
@@ -304,13 +335,17 @@ pub const READ_SCRIPT: &str = r#"(() => {
     }
     if (node.nodeType !== 1) return null;
     const el = node, tag = el.tagName.toUpperCase();
+    if ((tag === 'BUTTON' || /^(button|combobox)$/.test(el.getAttribute('role') || '')) && !hidden(el)) {
+      const prop = property(el);
+      if (prop || tag === 'BUTTON') return prop;
+    }
     if (SKIP.has(tag) || hidden(el)) return null;
     if (tag === 'PRE') { const t = el.textContent; chars -= t.length; return ['pre', null, t]; }
     if (tag === 'IMG') {
       const src = web(el.currentSrc || el.src || el.getAttribute('data-src'));
       if (!src) return el.alt ? el.alt : null;
       // The width the page shows it at, so avatars and icons stay small on the phone.
-      const w = Math.round(el.getBoundingClientRect().width) || el.width || 0;
+      const w = Math.round(el.getBoundingClientRect().width) || parseInt(getComputedStyle(el).width) || el.width || 0;
       return ['img', { src, alt: el.alt || '', w }];
     }
     if (tag === 'BR' || tag === 'HR') return [tag.toLowerCase(), null];
@@ -319,15 +354,25 @@ pub const READ_SCRIPT: &str = r#"(() => {
     kids = tidy(kids);
     if (!kids.length || (kids.length === 1 && kids[0] === ' ')) return null;
     if (tag === 'A') {
+      // A link back to this page (a title, a "3min ago") is just its text.
       const href = web(el.href);
-      return href ? ['a', { href }, ...kids] : ['span', null, ...kids];
+      if (!href || href.split('#')[0] === here) return kids.length === 1 && isBlock(kids[0]) ? kids[0] : ['span', null, ...kids];
+      // A link around a heading goes inside it, so the heading stays one.
+      if (kids.length === 1 && isBlock(kids[0]) && kids[0][0] !== 'div') return [kids[0][0], kids[0][1], ['a', { href }, ...kids[0].slice(2)]];
+      return ['a', { href }, ...kids];
     }
+    if (/^H[1-6]$/.test(tag)) return [tag.toLowerCase(), null, ...spaced(kids.map(inline))];
     if (/^(TABLE|THEAD|TBODY|TFOOT|TR|TD|TH)$/.test(tag) && isLayout(el)) {
       return tag === 'TD' || tag === 'TH' ? ['span', null, ...kids, ' '] : ['div', null, ...kids];
     }
     if (KEEP.has(tag)) return [tag.toLowerCase(), null, ...kids];
-    const d = getComputedStyle(el).display;
-    if (/^(inline|contents)$/.test(d)) return ['span', null, ...kids];
+    const st = getComputedStyle(el), d = st.display;
+    if (/flex/.test(d) && !st.flexDirection.startsWith('column') && kids.length > 1 && !kids.some(prose) && text(['div', null, ...kids]) <= 300) {
+      return [d === 'inline-flex' ? 'span' : 'div', null, ...spaced(kids.map(inline))];
+    }
+    // Inline boxes are often spaced apart by margins, not by text.
+    if (/^inline-/.test(d)) return ['span', null, ' ', ...kids, ' '];
+    if (/^inline$|^contents$/.test(d)) return ['span', null, ...kids];
     // A box holding only one box adds nothing.
     if (kids.length === 1 && isBlock(kids[0])) return kids[0];
     return ['div', null, ...kids];
