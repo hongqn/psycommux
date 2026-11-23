@@ -371,3 +371,11 @@ body.show-notifs #notifs { display: flex; }
 #composer .box.ended { opacity: .55; }
 /* Each wide character gets two cells: its 1em glyph plus the rest as letter spacing. */
 .term .w2 { display: inline-block; white-space: pre; overflow: visible; text-align: left; vertical-align: top; letter-spacing: calc(var(--cell, 0.6em) * 2 - 1em); }
+#suggest { display: flex; flex-direction: column; max-height: 38vh; overflow: auto; margin: 0 0 6px; background: var(--panel); border: 1px solid var(--line, #3a3a37); border-radius: 12px; }
+#suggest button { display: flex; align-items: baseline; gap: .7em; text-align: left; padding: .55em .85em; background: none; border: 0; border-radius: 0; color: var(--fg); font-size: 14px; min-width: 0; }
+#suggest button + button { border-top: 1px solid rgba(255,255,255,.06); }
+#suggest button b { flex: none; font: 600 13px ui-monospace, Menlo, monospace; }
+#suggest button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mute); font-size: 13px; }
+#suggest .more { padding: .5em .85em; font-size: 12px; color: var(--mute); }
+.peek .sel { color: var(--fg); background: rgba(255,255,255,.08); }
+.chat-status.dialog .peek { white-space: pre-wrap; overflow-wrap: anywhere; }

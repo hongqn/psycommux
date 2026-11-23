@@ -1877,3 +1877,11 @@ async fn an_ended_session_resumes_in_its_folder() {
         .await;
     assert_eq!(r.status, 400);
 }
+
+#[tokio::test]
+async fn peek_reports_the_input_state() {
+    let h = Harness::new().await;
+    let resp = h.post("/api/peek", json!({"surface_id": SURF_ID})).await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.json()["input"], "dialog");
+}

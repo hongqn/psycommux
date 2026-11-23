@@ -334,6 +334,9 @@ fn result(st: &mut FakeState, method: &str, params: &Value) -> Option<Value> {
             let text = if sid == SURF_ID { &st.text } else { &st.text2 };
             json!({"text": text, "surface_id": sid})
         }
+        "surface.input_state" => {
+            json!({"surface_id": sid, "state": "dialog", "blocks_typing": true})
+        }
         "surface.wait_text_change" => {
             let changed = params.get("after_revision").and_then(Value::as_str) != Some("rev-1");
             let text = if sid == SURF_ID { &st.text } else { &st.text2 };

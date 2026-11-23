@@ -1442,6 +1442,7 @@ $("micBtn").onclick = () => (dictation.on ? stopDictation(false) : startDictatio
 const TERMINAL_KEYS = [["Enter", "enter"], ["Esc", "escape"], ["Ctrl-C", "ctrl+c"], ["Tab", "tab"], ["⇧Tab", "shift+tab"], ["↑", "up"], ["↓", "down"], ["←", "left"], ["→", "right"], ["Ctrl-D", "ctrl+d"], ["PgUp", "pageup"], ["PgDn", "pagedown"]];
 const BROWSER_KEYS = [["Enter", "Enter"], ["Tab", "Tab"], ["⌫", "Backspace"], ["Esc", "Escape"], ["↑", "ArrowUp"], ["↓", "ArrowDown"]];
 let composerMode = "";
+let mirrorChat = null;  // the chat whose terminal has a slash command typed from here
 
 function updateComposer(view, surface) {
   const mode = view === "chat" || view === "terminal" || view === "browser" || view === "new" ? view : "";
@@ -1464,6 +1465,7 @@ function updateComposer(view, surface) {
   box.classList.toggle("ended", ended);
   if (ended) $("input").placeholder = "This session has ended";
   else if (mode === composerMode && mode === "chat") $("input").placeholder = "Reply to Claude";
+  if (mirrorChat && mirrorChat !== chat) { clearMirror(mirrorChat); hideSuggest(); }
   if (mode === composerMode) return;
   stopDictation(true);
   composerMode = mode;
@@ -1524,7 +1526,7 @@ function growInput() {
   const { surface } = selected();
   if (composerMode) updateComposer(composerMode, surface);
 }
-$("input").addEventListener("input", growInput);
+$("input").addEventListener("input", () => { growInput(); scheduleSuggest(); });
 $("input").addEventListener("keydown", (e) => {
   if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
   if (composerMode === "chat" && PHONE.matches) return;  // Return adds a line; the button sends
@@ -2156,6 +2158,49 @@ function setChatState(chat, value) {
     };
     st.append(el("span", { textContent: "This session has ended." }), resume);
   }
+  if (chat.dialog && value !== "needs_input" && value !== "ended") showDialog(chat);
+}
+
+// A menu in Claude Code's terminal that cmux reports as a dialog in its input
+// area, such as the one /rewind or /model opens. The agent itself is idle.
+function showDialog(chat) {
+  const st = chat.status;
+  st.replaceChildren(el("div", { className: "qh", textContent: "Claude Code is showing a menu" }));
+  st.className = "chat-status needs_input dialog";
+  renderPrompt(chat);
+}
+
+// A menu that leaves text in Claude Code's input, as /rewind does with the
+// message it took back, hands it to the composer here; the terminal's input
+// is cleared so that sending does not add to it. Only a one-line draft: Ctrl-U
+// clears a line.
+function takeDraft(chat, screen) {
+  const lines = screen.split("\n");
+  const rules = lines.map((l, i) => /^\s*[─━]{8,}\s*$/.test(l) ? i : -1).filter((i) => i >= 0);
+  if (rules.length < 2) return false;
+  const box = lines.slice(rules[rules.length - 2] + 1, rules[rules.length - 1]);
+  if (box.length !== 1 || !/^\s*❯\s/.test(box[0])) return false;  // ❯ and a no-break space
+  const text = box[0].replace(/^\s*❯\s/, "").trim();
+  const cur = typeaheadChat();
+  if (!text || cur !== chat || $("input").value.trim()) return false;
+  $("input").value = text;
+  growInput();
+  api("/api/key", { surface_id: chat.surfaceId, key: "ctrl+u" }).catch(() => {});
+  return true;
+}
+
+// Watch the input area while a menu may be open: from a slash command sent
+// from here until `grace` ms pass without one, and for as long as one shows.
+function watchDialog(chat, grace) {
+  chat.dialogUntil = Math.max(chat.dialogUntil || 0, Date.now() + grace);
+  if (chat.dialogWatch) return;
+  chat.dialogWatch = (async () => {
+    while (chat.status.isConnected && (chat.dialog || Date.now() < chat.dialogUntil)) {
+      await refreshPeek(chat);
+      await sleep(chat.dialog ? 700 : 400);
+    }
+    chat.dialogWatch = null;
+  })();
 }
 
 async function refreshPeek(chat) {
@@ -2163,9 +2208,25 @@ async function refreshPeek(chat) {
   try {
     const r = await api("/api/peek", { surface_id: chat.surfaceId });
     const text = (r.text || "").replace(/\s+$/, "");
-    if (text === chat.peek) return;
+    // The menu a dialog leads to can read as "unknown"; it lasts until the input
+    // is empty or holds a draft again.
+    const dialog = !chat.mirror && (r.input === "dialog" || (!!chat.dialog && r.input === "unknown"));
+    const changed = text !== chat.peek;
     chat.peek = text;
-    if (chat.state === "needs_input") renderPrompt(chat);
+    if (dialog !== !!chat.dialog) {
+      chat.dialog = dialog;
+      if (dialog) {
+        chat.msgs.querySelectorAll(".msg.pending.command").forEach((p) => p.remove());
+        watchDialog(chat, 0);
+      } else {
+        // The screen may lag the input state: look for a draft for a while.
+        chat.draftUntil = Date.now() + 3000;
+        watchDialog(chat, 3000);
+      }
+      setChatState(chat, chat.state);
+    }
+    if (!dialog && r.input === "draft" && Date.now() < (chat.draftUntil || 0) && takeDraft(chat, text)) chat.draftUntil = 0;
+    else if (changed && (chat.state === "needs_input" || dialog)) renderPrompt(chat);
   } catch (e) { /* keep the last one */ }
 }
 
@@ -2220,6 +2281,19 @@ function parsePrompt(text) {
   return { title: head.map((l) => l.trim()).join(" "), question, options, context: context.map((l) => l.slice(indent)).join("\n") };
 }
 
+// The bottom of the screen from the last rule across it: where Claude Code
+// draws its menus. Falls back to the last lines.
+function menuLines(text) {
+  const lines = text.split("\n");
+  let i = lines.length - 1;
+  while (i >= 0 && !/^\s*[─━]{8,}\s*$/.test(lines[i])) i--;
+  const menu = i >= 0 ? lines.slice(i + 1) : lines.slice(-14);
+  while (menu.length && !menu[menu.length - 1].trim()) menu.pop();
+  while (menu.length && !menu[0].trim()) menu.shift();
+  const indent = Math.min(...menu.filter((l) => l.trim()).map((l) => l.match(/^ */)[0].length));
+  return menu.map((l) => l.slice(indent));
+}
+
 function renderPrompt(chat) {
   const st = chat.status;
   st.querySelectorAll(":scope > :not(.qh)").forEach((n) => n.remove());
@@ -2230,14 +2304,19 @@ function renderPrompt(chat) {
     st.append(el("div", { className: "ptitle", textContent: "Answer the question above." }));
     return;
   }
-  const p = parsePrompt(chat.peek || "");
+  // A menu is drawn under the last rule; a permission prompt may start above it.
+  const p = parsePrompt(chat.dialog && chat.state !== "needs_input" ? menuLines(chat.peek || "").join("\n") : chat.peek || "");
   const foot = el("div", { className: "pfoot" }, el("button", { textContent: "Esc", title: "Cancel", onclick: esc }));
   if (!p) {
+    // A menu without numbers: show it as drawn, its selected line marked, and
+    // the keys that move through it.
+    const key = (k) => chat.surfaceId && api("/api/key", { surface_id: chat.surfaceId, key: k }).then(() => refreshPeek(chat)).catch(failed);
+    foot.prepend(...[["↑", "up"], ["↓", "down"], ["Enter", "enter"]].map(([label, k]) => el("button", { textContent: label, onclick: () => key(k) })));
     foot.append(el("button", { textContent: "Terminal", onclick: term }));
-    // Unknown screen: show its bottom and the usual keys.
-    const keys = ["1", "2", "3"].map((n) => el("button", { textContent: n, onclick: () => send(n) }));
-    foot.prepend(...keys);
-    st.append(el("pre", { className: "peek", textContent: (chat.peek || "").split("\n").slice(-14).join("\n") }), foot);
+    const pre = el("pre", { className: "peek" });
+    for (const line of menuLines(chat.peek || "")) pre.append(el("span", { className: /^\s*❯/.test(line) ? "sel" : "", textContent: line + "\n" }));
+    st.append(pre, foot);
+    requestAnimationFrame(() => { const sel = pre.querySelector(".sel"); if (sel) sel.scrollIntoView({ block: "nearest" }); });
     return;
   }
   if (p.title) st.append(el("div", { className: "ptitle", textContent: p.title }));
@@ -2316,6 +2395,7 @@ async function chatLoop(poll, sid) {
         chat.older.hidden = chat.start <= 0;
         setChatState(chat, page.state);
         restoreScroll(chat.scroll);
+        refreshPeek(chat);  // a menu may be open
         continue;
       }
       const upd = await api("/api/chat/poll", { session_id: sid, after: chat.end, state: chat.state }, poll.abort.signal);
@@ -2348,17 +2428,130 @@ function restartChatPolls() {
 
 async function sendChat(s, text) {
   const chat = chatState(s.agent.session_id);
-  const pending = el("div", { className: "msg user pending", textContent: text });
+  hideSuggest();
+  await clearMirror(chat);
+  // A slash command may open a menu instead of reaching the transcript.
+  const command = /^\/\S/.test(text.trim());
+  const pending = el("div", { className: "msg user pending" + (command ? " command" : ""), textContent: text });
   chat.msgs.append(pending);
   delete state.fromBottom[chat.scroll.dataset.surface];
   restoreScroll(chat.scroll);
   try {
     await api("/api/chat/send", { session_id: s.agent.session_id, text });
+    if (command) {
+      watchDialog(chat, 4000);
+      setTimeout(() => pending.remove(), 6000);
+    }
   } catch (e) {
     pending.classList.add("failed");
     pending.title = e.message;
     throw e;
   }
+}
+
+// ---- slash commands -----------------------------------------------------------
+// While a slash command is typed here, the same text is typed into Claude
+// Code's empty input in the terminal, and the commands and skills it lists
+// there show above the composer. The terminal is cleared again when the text
+// stops being a command name or is sent. A draft someone left in the terminal
+// is never touched: then nothing is listed.
+const COMMAND_NAME = /^\/[^\s]*$/;
+let suggestTimer = 0;
+
+function typeaheadChat() {
+  const { surface } = selected();
+  if (composerMode !== "chat" || !surface || !surface.agent) return null;
+  const chat = state.chats[surface.agent.session_id];
+  return chat && chat.surfaceId && chat.state !== "ended" ? chat : null;
+}
+
+function scheduleSuggest() {
+  clearTimeout(suggestTimer);
+  suggestTimer = setTimeout(() => {
+    const chat = typeaheadChat();
+    if (!chat) return hideSuggest();
+    chat.typing = (chat.typing || Promise.resolve()).then(() => suggest(chat)).catch(() => hideSuggest());
+  }, 120);
+}
+
+async function suggest(chat) {
+  const text = $("input").value;
+  const surface_id = chat.surfaceId;
+  if (!COMMAND_NAME.test(text) || chat.dialog) {
+    hideSuggest();
+    await clearMirror(chat);
+    return;
+  }
+  if (chat.mirror == null) {
+    const r = await api("/api/peek", { surface_id });
+    if (r.input !== "empty") return hideSuggest();
+    chat.mirror = "";
+    mirrorChat = chat;
+  }
+  if (text !== chat.mirror) {
+    if (text.startsWith(chat.mirror)) await api("/api/send", { surface_id, text: text.slice(chat.mirror.length), enter: false });
+    else {
+      await api("/api/key", { surface_id, key: "ctrl+u" });
+      await api("/api/send", { surface_id, text, enter: false });
+    }
+    chat.mirror = text;
+    await sleep(250);
+  }
+  const r = await api("/api/peek", { surface_id });
+  if ($("input").value !== text || chat.mirror !== text) return;
+  showSuggest(commandList(r.text || ""));
+}
+
+async function clearMirror(chat) {
+  if (chat.mirror == null) return;
+  chat.mirror = null;
+  if (mirrorChat === chat) mirrorChat = null;
+  await api("/api/key", { surface_id: chat.surfaceId, key: "ctrl+u" }).catch(() => {});
+}
+
+// Claude Code's list under its input:
+//   /rewind                Restore earlier code, conversation, or both
+//   /clear (reset)         Start a new session with empty context…
+//   ↓ 64 more
+function commandList(text) {
+  const lines = text.split("\n");
+  let i = lines.length - 1;
+  while (i >= 0 && !/^\s*[❯>]\s*\//.test(lines[i])) i--;
+  const out = [];
+  for (const line of lines.slice(i + 1)) {
+    const m = line.match(/^\s+(\/\S+)(?: \(([^)]*)\))?(?:\s{2,}(.*?))?\s*$/);
+    if (m) out.push({ name: m[1], alias: m[2] || "", detail: m[3] || "" });
+    else if (/^\s*↓\s*\d+ more/.test(line)) out.more = line.trim();
+  }
+  return out;
+}
+
+function showSuggest(list) {
+  let box = $("suggest");
+  if (!list.length) return hideSuggest();
+  if (!box) {
+    box = el("div", { id: "suggest" });
+    $("composer").insertBefore(box, $("composer").querySelector(".box"));
+  }
+  box.replaceChildren();
+  for (const c of list) {
+    const b = el("button", {}, el("b", { textContent: c.name }), el("span", { textContent: c.detail }));
+    if (c.alias) b.title = c.alias;
+    b.addEventListener("pointerdown", (e) => e.preventDefault());  // keep the keyboard up
+    b.onclick = () => {
+      $("input").value = c.name + " ";
+      growInput();
+      $("input").focus();
+      scheduleSuggest();
+    };
+    box.append(b);
+  }
+  if (list.more) box.append(el("div", { className: "more", textContent: "Keep typing to narrow the list (" + list.more.replace(/^↓\s*/, "") + ")" }));
+}
+
+function hideSuggest() {
+  const box = $("suggest");
+  if (box) box.remove();
 }
 
 // ---- terminal painting ------------------------------------------------------

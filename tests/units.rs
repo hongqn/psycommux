@@ -463,3 +463,79 @@ fn faint_terminal_text_is_a_solid_color() {
         Some("#808080")
     );
 }
+
+fn line(uuid: &str, parent: Option<&str>, role: &str, text: &str) -> Vec<u8> {
+    jl(json!({"type": role, "uuid": uuid, "parentUuid": parent,
+              "message": {"role": role, "content": [{"type": "text", "text": text}]}}))
+}
+
+fn texts(v: &Value) -> Vec<String> {
+    v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["text"].as_str().unwrap_or("").to_string())
+        .collect()
+}
+
+/// After a rewind the next prompt follows an earlier line; what came between is gone.
+#[test]
+fn rewound_turns_are_left_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("r.jsonl");
+    let mut data = Vec::new();
+    data.extend(line("u1", None, "user", "one"));
+    data.extend(line("a1", Some("u1"), "assistant", "ONE"));
+    data.extend(jl(
+        json!({"type": "attachment", "uuid": "h1", "parentUuid": "a1", "attachment": {}}),
+    ));
+    data.extend(line("u2", Some("h1"), "user", "two"));
+    data.extend(line("a2", Some("u2"), "assistant", "TWO"));
+    data.extend(jl(json!({"type": "last-prompt", "leafUuid": "a2"})));
+    let before_rewind = data.len() as u64;
+    data.extend(line("u3", Some("h1"), "user", "three"));
+    data.extend(line("a3", Some("u3"), "assistant", "THREE"));
+    std::fs::write(&path, &data).unwrap();
+
+    let page = read_tail(&path, None, 80, agentchat::CHUNK).unwrap();
+    assert_eq!(texts(&page), ["one", "ONE", "three", "THREE"]);
+    // Small chunks and pages: the rewind is followed across chunks, and the
+    // earlier page starts before it.
+    let last = read_tail(&path, None, 2, 60).unwrap();
+    assert_eq!(texts(&last), ["three", "THREE"]);
+    let earlier = read_tail(&path, last["start"].as_u64(), 80, 60).unwrap();
+    assert_eq!(texts(&earlier), ["one", "ONE"]);
+
+    // Read forward from before the rewind: the page shown is out of date.
+    let update = read_since(&path, before_rewind).unwrap();
+    assert_eq!(update["reset"], true);
+    assert_eq!(texts(&update), ["one", "ONE", "three", "THREE"]);
+}
+
+#[test]
+fn prompt_following_the_last_line_reads_forward() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("f.jsonl");
+    let mut data = line("u1", None, "user", "one");
+    data.extend(line("a1", Some("u1"), "assistant", "ONE"));
+    let offset = data.len() as u64;
+    data.extend(jl(json!({"type": "mode", "mode": "normal"})));
+    data.extend(line("u2", Some("a1"), "user", "two"));
+    std::fs::write(&path, &data).unwrap();
+    let update = read_since(&path, offset).unwrap();
+    assert_eq!(update["reset"], Value::Null);
+    assert_eq!(texts(&update), ["two"]);
+}
+
+/// A prompt whose earlier line is not in the file (say, a forked session) hides nothing.
+#[test]
+fn missing_parent_hides_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("m.jsonl");
+    let mut data = line("u1", None, "user", "one");
+    data.extend(line("a1", Some("u1"), "assistant", "ONE"));
+    data.extend(line("u2", Some("elsewhere"), "user", "two"));
+    std::fs::write(&path, &data).unwrap();
+    let page = read_tail(&path, None, 1, 40).unwrap();
+    assert_eq!(texts(&page), ["one", "ONE", "two"]);
+}

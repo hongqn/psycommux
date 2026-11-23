@@ -1126,14 +1126,19 @@ async fn dispatch_post(
             ok()
         }
         "/api/peek" => {
-            // The visible screen, for prompts the transcript does not show yet.
+            // The visible screen, for prompts the transcript does not show yet,
+            // and what cmux says its input area holds: empty, draft, or a
+            // dialog such as a menu a slash command opened.
+            let surface_id = body.need("surface_id")?;
             let result = client
-                .call(
-                    "surface.read_text",
-                    json!({"surface_id": body.need("surface_id")?}),
-                )
+                .call("surface.read_text", json!({"surface_id": surface_id}))
                 .await?;
-            json!({"text": screen_text(&result)})
+            let input = client
+                .call("surface.input_state", json!({"surface_id": surface_id}))
+                .await
+                .map(|v| field(&v, "state"))
+                .unwrap_or(Value::Null);
+            json!({"text": screen_text(&result), "input": input})
         }
         p if p.starts_with("/api/chat/") => {
             return chat(state, &p["/api/chat/".len()..], &body).await

@@ -324,32 +324,64 @@ fn truthy(v: &Value, key: &str) -> bool {
     }
 }
 
+/// One transcript line: its place in the conversation and its display items.
+#[derive(Default)]
+struct Entry {
+    uuid: Option<String>,
+    parent: Option<String>,
+    /// Something the user typed, as opposed to a tool result or a note.
+    prompt: bool,
+    items: Vec<Item>,
+}
+
 /// Display items for one transcript line (often none).
 pub fn parse_line(raw: &[u8]) -> Vec<Item> {
+    parse_entry(raw).items
+}
+
+fn parse_entry(raw: &[u8]) -> Entry {
     if let Some(caps) = LEADING_TYPE.captures(raw)
         && !matches!(&caps[1], b"user" | b"assistant" | b"system")
     {
-        return vec![];
+        return Entry::default();
     }
     let Ok(d) = serde_json::from_slice::<Value>(raw) else {
-        return vec![];
+        return Entry::default();
     };
-    if !d.is_object() {
-        return vec![];
+    if !d.is_object() || truthy(&d, "isSidechain") {
+        return Entry::default();
     }
     let kind = s(&d, "type").unwrap_or("");
-    if !matches!(kind, "user" | "assistant" | "system")
-        || truthy(&d, "isSidechain")
-        || truthy(&d, "isMeta")
-    {
+    let content = d.pointer("/message/content");
+    let prompt = kind == "user"
+        && !truthy(&d, "isMeta")
+        && match content {
+            Some(Value::String(_)) => true,
+            Some(Value::Array(blocks)) => {
+                let has = |t: &str| blocks.iter().any(|b| s(b, "type") == Some(t));
+                has("text") && !has("tool_result")
+            }
+            _ => false,
+        };
+    Entry {
+        uuid: nonempty(&d, "uuid").map(str::to_string),
+        parent: nonempty(&d, "parentUuid").map(str::to_string),
+        prompt,
+        items: line_items(&d),
+    }
+}
+
+fn line_items(d: &Value) -> Vec<Item> {
+    let kind = s(d, "type").unwrap_or("");
+    if !matches!(kind, "user" | "assistant" | "system") || truthy(d, "isMeta") {
         return vec![];
     }
-    let uid = s(&d, "uuid").unwrap_or("");
+    let uid = s(d, "uuid").unwrap_or("");
     let mut base = Item::new();
     base.insert("id".into(), json!(uid));
-    base.insert("ts".into(), json!(s(&d, "timestamp").unwrap_or("")));
+    base.insert("ts".into(), json!(s(d, "timestamp").unwrap_or("")));
     if kind == "system" {
-        if s(&d, "subtype") == Some("compact_boundary") {
+        if s(d, "subtype") == Some("compact_boundary") {
             return vec![with(
                 &base,
                 json!({"kind": "note", "text": "Conversation compacted"}),
@@ -357,7 +389,7 @@ pub fn parse_line(raw: &[u8]) -> Vec<Item> {
         }
         return vec![];
     }
-    if truthy(&d, "isCompactSummary") {
+    if truthy(d, "isCompactSummary") {
         return vec![];
     }
     let blocks: Vec<Value> = match d.pointer("/message/content") {
@@ -405,11 +437,8 @@ pub fn parse_line(raw: &[u8]) -> Vec<Item> {
     items
 }
 
-fn parse_lines<'a>(lines: impl Iterator<Item = &'a [u8]>) -> Vec<Item> {
-    lines
-        .filter(|l| !l.is_empty())
-        .flat_map(parse_line)
-        .collect()
+fn entries<'a>(lines: impl Iterator<Item = &'a [u8]>) -> Vec<Entry> {
+    lines.filter(|l| !l.is_empty()).map(parse_entry).collect()
 }
 
 fn read_at(fh: &mut File, pos: u64, len: u64) -> io::Result<Vec<u8>> {
@@ -417,6 +446,63 @@ fn read_at(fh: &mut File, pos: u64, len: u64) -> io::Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(len as usize);
     fh.take(len).read_to_end(&mut buf)?;
     Ok(buf)
+}
+
+/// Leaves out what a rewind took back, reading lines from the end.
+///
+/// Claude Code links each line to the one before it (`parentUuid`). Something
+/// typed normally follows the last line; after a rewind, or a message taken
+/// back with Esc, it follows an earlier one, and the lines in between are no
+/// longer part of the conversation. Should the earlier line never turn up,
+/// nothing is left out.
+#[derive(Default)]
+struct Rewinds {
+    /// The line the last prompt seen follows, while looking for it.
+    seek: Option<String>,
+    /// Items in reverse file order, and whether they wait to be left out.
+    out: Vec<(Item, bool)>,
+}
+
+impl Rewinds {
+    fn push_back(&mut self, entry: Entry) {
+        if let Some(uuid) = &entry.uuid {
+            if let Some(parent) = &self.seek {
+                if parent != uuid {
+                    self.out
+                        .extend(entry.items.into_iter().rev().map(|i| (i, true)));
+                    return;
+                }
+                self.seek = None;
+                self.out.retain(|(_, dropped)| !dropped);
+            }
+            if entry.prompt {
+                self.seek = entry.parent.clone();
+            }
+        }
+        self.out
+            .extend(entry.items.into_iter().rev().map(|i| (i, false)));
+    }
+
+    fn give_up(&mut self) {
+        self.seek = None;
+        for (_, dropped) in &mut self.out {
+            *dropped = false;
+        }
+    }
+
+    fn shown(&self) -> usize {
+        self.out
+            .iter()
+            .filter(|(it, dropped)| {
+                !dropped && it.get("kind").and_then(Value::as_str) != Some("result")
+            })
+            .count()
+    }
+
+    fn items(mut self) -> Vec<Item> {
+        self.give_up();
+        self.out.into_iter().rev().map(|(i, _)| i).collect()
+    }
 }
 
 /// Items from complete lines ending at byte offset `before` (default: end of file).
@@ -445,10 +531,11 @@ pub fn read_tail(path: &Path, before: Option<u64>, want: usize, chunk: u64) -> i
     }
     let mut pos = end;
     let mut carry: Vec<u8> = Vec::new();
-    let mut pages: Vec<Vec<Item>> = Vec::new();
-    let mut count = 0;
+    let mut kept = Rewinds::default();
     let mut scanned = 0;
-    while pos > 0 && count < want && scanned < MAX_BACK_SCAN {
+    // A rewind found near the top of the page is followed to its end, so pages
+    // never start inside what it took back.
+    while pos > 0 && (kept.shown() < want || kept.seek.is_some()) && scanned < MAX_BACK_SCAN {
         let step = chunk.min(pos);
         pos -= step;
         let mut buf = read_at(&mut fh, pos, step)?;
@@ -460,38 +547,82 @@ pub fn read_tail(path: &Path, before: Option<u64>, want: usize, chunk: u64) -> i
         } else {
             (&lines[..], Vec::new())
         };
-        let items = parse_lines(body.iter().copied());
-        count += items
-            .iter()
-            .filter(|it| it.get("kind").and_then(Value::as_str) != Some("result"))
-            .count();
-        pages.push(items);
+        for entry in entries(body.iter().copied()).into_iter().rev() {
+            kept.push_back(entry);
+        }
         carry = new_carry;
     }
     let mut start = pos + carry.len() as u64;
     if pos == 0 && !carry.is_empty() {
-        pages.push(parse_line(&carry));
+        kept.push_back(parse_entry(&carry));
         start = 0;
     }
-    let items: Vec<Item> = pages.into_iter().rev().flatten().collect();
-    Ok(json!({"items": items, "start": start, "end": end}))
+    Ok(json!({"items": kept.items(), "start": start, "end": end}))
+}
+
+/// The `uuid` of the last line before byte `offset` that has one.
+fn last_uuid_before(fh: &mut File, offset: u64) -> io::Result<Option<String>> {
+    let mut pos = offset;
+    let mut carry: Vec<u8> = Vec::new();
+    while pos > 0 && offset - pos < MAX_BACK_SCAN {
+        let step = CHUNK.min(pos);
+        pos -= step;
+        let mut buf = read_at(fh, pos, step)?;
+        buf.extend_from_slice(&carry);
+        let lines: Vec<&[u8]> = buf.split(|&b| b == b'\n').collect();
+        let (body, first) = if pos > 0 {
+            (&lines[1..], lines[0])
+        } else {
+            (&lines[..], &b""[..])
+        };
+        for line in body.iter().rev().filter(|l| !l.is_empty()) {
+            if let Some(uuid) = parse_entry(line).uuid {
+                return Ok(Some(uuid));
+            }
+        }
+        carry = first.to_vec();
+    }
+    Ok(None)
 }
 
 /// Items from complete lines after byte `offset`, and the offset to continue from.
+///
+/// When those lines rewind past `offset`, the page shown so far is wrong: the
+/// reply is the tail again, marked `reset`.
 pub fn read_since(path: &Path, offset: u64) -> io::Result<Value> {
     let mut fh = File::open(path)?;
     let size = fh.metadata()?.len();
-    if offset > size || size - offset > MAX_FORWARD_READ {
-        // Truncated, replaced, or too far behind: start over from the tail.
+    let reset = |path: &Path| -> io::Result<Value> {
         let mut tail = read_tail(path, None, 80, CHUNK)?;
         tail["reset"] = json!(true);
-        return Ok(tail);
+        Ok(tail)
+    };
+    if offset > size || size - offset > MAX_FORWARD_READ {
+        // Truncated, replaced, or too far behind: start over from the tail.
+        return reset(path);
     }
     let buf = read_at(&mut fh, offset, size - offset)?;
     let Some(cut) = buf.iter().rposition(|&b| b == b'\n') else {
         return Ok(json!({"items": [], "end": offset}));
     };
-    let items = parse_lines(buf[..cut].split(|&b| b == b'\n'));
+    let new = entries(buf[..cut].split(|&b| b == b'\n'));
+    let mut last: Option<Option<String>> = None;
+    for entry in &new {
+        if entry.uuid.is_none() {
+            continue;
+        }
+        if entry.prompt && entry.parent.is_some() {
+            let before = match last.take() {
+                Some(uuid) => uuid,
+                None => last_uuid_before(&mut fh, offset)?,
+            };
+            if before.is_some() && before != entry.parent {
+                return reset(path);
+            }
+        }
+        last = Some(entry.uuid.clone());
+    }
+    let items: Vec<Item> = new.into_iter().flat_map(|e| e.items).collect();
     Ok(json!({"items": items, "end": offset + cut as u64 + 1}))
 }
 
